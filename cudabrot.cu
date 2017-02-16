@@ -33,20 +33,40 @@ typedef struct {
   double delta_imag;
 } FractalDimensions;
 
+// Tracks a single pair of points which escaped the mandelbrot set. These will
+// be used as the start points of buddhabrot paths.
+typedef struct {
+  double real;
+  double imag;
+} EscapingPoint;
+
 // Holds globals in a single namespace.
 static struct {
   SDL_Window *window;
   SDL_Renderer *renderer;
   SDL_Texture *image;
-  // The maximum number of iterations to run each point.
-  uint32_t max_iterations;
+  // The maximum number of iterations to run each point in the initial
+  // mandelbrot calculation.
+  int mandelbrot_iterations;
+  // The number of iterations to track the paths of escaping points in the
+  // buddhabrot.
+  int buddhabrot_iterations;
   // The size and location of the fractal and output image.
   FractalDimensions dimensions;
   // Pointer to the device memory that will contain 0 if a point is in the set,
   // and 1 if it escapes the set.
-  uint8_t *device_point_escapes;
-  // The host-side copy of which points escape.
-  uint8_t *host_point_escapes;
+  uint8_t *device_mandelbrot;
+  // The host-side copy of the basic binary mandelbrot set.
+  uint8_t *host_mandelbrot;
+  // Lists of points which escape the mandelbrot set.
+  EscapingPoint *host_escaping_points;
+  EscapingPoint *device_escaping_points;
+  // The number of points which escaped the mandelbrot set.
+  int escaping_point_count;
+  // The host and device buffers which contain the numbers of times an escaping
+  // point's path crossed each point in the complex plane.
+  uint32_t *device_buddhabrot;
+  uint32_t *host_buddhabrot;
 } g;
 
 // If any globals have been initialized, this will free them. (Relies on
@@ -55,8 +75,10 @@ static void CleanupGlobals(void) {
   if (g.renderer) SDL_DestroyRenderer(g.renderer);
   if (g.image) SDL_DestroyTexture(g.image);
   if (g.window) SDL_DestroyWindow(g.window);
-  if (g.device_point_escapes) cudaFree(g.device_point_escapes);
-  if (g.host_point_escapes) free(g.host_point_escapes);
+  if (g.device_mandelbrot) cudaFree(g.device_mandelbrot);
+  if (g.host_mandelbrot) free(g.host_mandelbrot);
+  if (g.host_escaping_points) free(g.host_escaping_points);
+  if (g.device_escaping_points) cudaFree(g.device_escaping_points);
   memset(&g, 0, sizeof(g));
 }
 
@@ -105,10 +127,21 @@ static void SetupSDL(void) {
 // g.w and g.h have been set.
 static void SetupCUDA(void) {
   size_t buffer_size = g.dimensions.w * g.dimensions.h;
-  CheckCUDAError(cudaMalloc(&(g.device_point_escapes), buffer_size));
-  g.host_point_escapes = (uint8_t *) malloc(buffer_size);
-  if (!g.host_point_escapes) {
-    printf("Failed allocating host buffer.\n");
+  CheckCUDAError(cudaMalloc(&(g.device_mandelbrot), buffer_size));
+  CheckCUDAError(cudaMemset(g.device_mandelbrot, 0, buffer_size));
+  g.host_mandelbrot = (uint8_t *) malloc(buffer_size);
+  if (!g.host_mandelbrot) {
+    printf("Failed allocating host mandelbrot buffer.\n");
+    CleanupGlobals();
+    exit(1);
+  }
+  CheckCUDAError(cudaMalloc(&(g.device_buddhabrot), buffer_size *
+    sizeof(uint32_t)));
+  CheckCUDAError(cudaMemset(g.device_buddhabrot, 0, buffer_size *
+    sizeof(uint32_t)));
+  g.host_buddhabrot = (uint32_t *) malloc(buffer_size * sizeof(uint32_t));
+  if (!g.host_buddhabrot) {
+    printf("Failed allocating host buddhabrot buffer.\n");
     CleanupGlobals();
     exit(1);
   }
@@ -147,16 +180,122 @@ __global__ void BasicMandelbrot(uint8_t *data, int iterations,
   data[row * dimensions.w + col] = escaped;
 }
 
+// After BasicMandelbrot has been completed, and host_mandelbrot has been
+// filled in, this will allocate and populate both device_escaping_points and
+// host_escaping_points.
+static void GatherEscapingPoints(void) {
+  int w = g.dimensions.w;
+  int h = g.dimensions.h;
+  int x, y;
+  size_t points_size = 0;
+  int points_added = 0;
+  EscapingPoint *escaping_point = NULL;
+
+  // First, get a count of the escaping points, so the correct amount of memory
+  // can be allocated.
+  int count = 0;
+  for (y = 0; y < h; y++) {
+    for (x = 0; x < w; x++) {
+      if (g.host_mandelbrot[y * w + x]) count++;
+    }
+  }
+  g.escaping_point_count = count;
+
+  // Next, build the list of escaping points and copy it to GPU memory.
+  points_size = count * sizeof(EscapingPoint);
+  g.host_escaping_points = (EscapingPoint *) malloc(points_size);
+  if (!g.host_escaping_points) {
+    printf("Failed allocating space for escaping point list.\n");
+    CleanupGlobals();
+    exit(1);
+  }
+  CheckCUDAError(cudaMalloc(&(g.device_escaping_points), points_size));
+  for (y = 0; y < h; y++) {
+    for (x = 0; x < w; x++) {
+      if (!g.host_mandelbrot[y * w + x]) continue;
+      escaping_point = g.host_escaping_points + points_added;
+      escaping_point->real = ((double) x) * g.dimensions.delta_real +
+        g.dimensions.min_real;
+      escaping_point->imag = ((double) y) * g.dimensions.delta_imag +
+        g.dimensions.min_imag;
+      points_added++;
+    }
+  }
+  CheckCUDAError(cudaMemcpy(g.device_escaping_points, g.host_escaping_points,
+    points_size, cudaMemcpyHostToDevice));
+}
+
+// This kernel takes a list of points which escape the mandelbrot set, and, for
+// each iteration of the point, increments its location in the data array.
+__global__ void DrawBuddhabrot(EscapingPoint *points, int point_count,
+    uint32_t *data, int iterations, FractalDimensions dimensions) {
+  int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+  if (index >= point_count) return;
+  int i;
+  double start_real = points[index].real;
+  double start_imag = points[index].imag;
+  double current_real = start_real;
+  double current_imag = start_imag;
+  double tmp;
+  int row, col;
+  // This should only happen in the final block.
+  if (index > point_count) return;
+  for (i = 0; i < iterations; i++) {
+    tmp = (current_real * current_real) - (current_imag * current_imag) +
+      start_real;
+    current_imag = 2 * current_real * current_imag + start_imag;
+    current_real = tmp;
+    row = (current_imag - dimensions.min_imag) / dimensions.delta_imag;
+    col = (current_real - dimensions.min_real) / dimensions.delta_real;
+    if ((row >= 0) && (row < dimensions.h) && (col >= 0) && (col <
+      dimensions.w)) {
+      data[row * dimensions.w + col]++;
+    }
+  }
+}
+
 // Renders the fractal image.
 static void RenderImage(void) {
   int block_count;
   size_t data_size = g.dimensions.w * g.dimensions.h;
+
+  // First, draw the basic mandelbrot to get which points escape.
   block_count = (data_size / DEFAULT_BLOCK_SIZE) + 1;
-  BasicMandelbrot<<<block_count, DEFAULT_BLOCK_SIZE>>>(g.device_point_escapes,
-    g.max_iterations, g.dimensions);
+  BasicMandelbrot<<<block_count, DEFAULT_BLOCK_SIZE>>>(g.device_mandelbrot,
+    g.mandelbrot_iterations, g.dimensions);
   CheckCUDAError(cudaGetLastError());
-  CheckCUDAError(cudaMemcpy(g.host_point_escapes, g.device_point_escapes,
+  CheckCUDAError(cudaMemcpy(g.host_mandelbrot, g.device_mandelbrot,
     data_size, cudaMemcpyDeviceToHost));
+
+  // Next, get the list of points that escape.
+  GatherEscapingPoints();
+  EscapingPoint p = g.host_escaping_points[g.escaping_point_count - 1];
+  int row = (p.imag - g.dimensions.min_imag) / g.dimensions.delta_imag;
+  int col = (p.real - g.dimensions.min_real) / g.dimensions.delta_real;
+  printf("Escaping point %f,%f: row %d, col %d\n", p.real, p.imag, row, col);
+
+  // Finally, draw the Buddhabrot
+  block_count = (g.escaping_point_count / DEFAULT_BLOCK_SIZE) + 1;
+  DrawBuddhabrot<<<block_count, DEFAULT_BLOCK_SIZE>>>(g.device_escaping_points,
+    g.escaping_point_count, g.device_buddhabrot, g.buddhabrot_iterations,
+    g.dimensions);
+  CheckCUDAError(cudaGetLastError());
+  CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
+    data_size * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+}
+
+static double GetColorScale(void) {
+  // TODO: Figure out a color scaling system that works:
+  //  - Highest value should still be 255.
+  //  - Lowest value should be some pale gray
+  //  - Should have a lograthmic curve that amplifies low values a lot
+  return 16;
+}
+
+static uint8_t Clamp(double v) {
+  if (v <= 0) return 0;
+  if (v >= 255) return 255;
+  return (uint8_t) v;
 }
 
 // Copies data from the host-side data buffer to the texture drawn to the SDL
@@ -167,7 +306,8 @@ static void UpdateDisplayedImage(void) {
   int image_pitch;
   int to_skip_per_row;
   uint8_t color_value;
-  uint8_t *host_data = g.host_point_escapes;
+  double color_scale = GetColorScale();
+  uint32_t *host_data = g.host_buddhabrot;
   if (SDL_LockTexture(g.image, NULL, (void **) (&image_pixels), &image_pitch)
     < 0) {
     printf("Error locking SDL texture: %s\n", SDL_GetError());
@@ -179,11 +319,7 @@ static void UpdateDisplayedImage(void) {
   to_skip_per_row = image_pitch - (g.dimensions.w * 4);
   for (y = 0; y < g.dimensions.h; y++) {
     for (x = 0; x < g.dimensions.w; x++) {
-      if (*host_data) {
-        color_value = 0xff;
-      } else {
-        color_value = 0;
-      }
+      color_value = Clamp(color_scale * (*host_data));
       // The byte order is ABGR
       image_pixels[0] = 0xff;
       image_pixels[1] = color_value;
@@ -236,7 +372,8 @@ int main(int argc, char **argv) {
     ((double) dimensions->w);
   dimensions->delta_imag = (dimensions->max_imag - dimensions->min_imag) /
     ((double) dimensions->h);
-  g.max_iterations = 200;
+  g.mandelbrot_iterations = 100;
+  g.buddhabrot_iterations = 10000;
   printf("Calculating image...\n");
   SetupCUDA();
   RenderImage();
