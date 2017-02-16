@@ -8,14 +8,30 @@ extern "C" {
 #include <SDL2/SDL.h>
 }
 
-#define LOG2 (0.30102999566)
-
 // The number of CUDA threads to use per block.
 #define DEFAULT_BLOCK_SIZE (128)
+
+// The number of iterations to record the paths of points that escape the set.
+#define PATH_ITERATIONS (20000)
 
 // This macro takes a cudaError_t value and exits the program if it isn't equal
 // to cudaSuccess. (Calls the ErrorCheck function, defined later).
 #define CheckCUDAError(val) (InternalCUDAErrorCheck((val), #val, __FILE__, __LINE__))
+
+// Holds the boundaries and sizes of the fractal, in both pixels and numbers
+typedef struct {
+  // The width and height of the image in pixels.
+  int w;
+  int h;
+  // The boundaries of the fractal.
+  double min_real;
+  double min_imag;
+  double max_real;
+  double max_imag;
+  // The distance between pixels in the real and imaginary axes.
+  double delta_real;
+  double delta_imag;
+} FractalDimensions;
 
 // Holds globals in a single namespace.
 static struct {
@@ -24,22 +40,13 @@ static struct {
   SDL_Texture *image;
   // The maximum number of iterations to run each point.
   uint32_t max_iterations;
-  // The width and height, in pixels, of the output image.
-  int w;
-  int h;
-  // The boundaries of the fractal.
-  double min_real;
-  double min_imag;
-  double max_real;
-  double max_imag;
-  // The distance between one pixel in the real and imaginary axes.
-  double delta_real;
-  double delta_imag;
-  // Pointer to the device memory that will be iterated over.
-  float *device_data;
-  // The host-side copy of the data, that will receive the copy of device_data
-  // after calculations have completed.
-  float *host_data;
+  // The size and location of the fractal and output image.
+  FractalDimensions dimensions;
+  // Pointer to the device memory that will contain 0 if a point is in the set,
+  // and 1 if it escapes the set.
+  uint8_t *device_point_escapes;
+  // The host-side copy of which points escape.
+  uint8_t *host_point_escapes;
 } g;
 
 // If any globals have been initialized, this will free them. (Relies on
@@ -48,8 +55,8 @@ static void CleanupGlobals(void) {
   if (g.renderer) SDL_DestroyRenderer(g.renderer);
   if (g.image) SDL_DestroyTexture(g.image);
   if (g.window) SDL_DestroyWindow(g.window);
-  if (g.device_data) cudaFree(g.device_data);
-  if (g.host_data) free(g.host_data);
+  if (g.device_point_escapes) cudaFree(g.device_point_escapes);
+  if (g.host_point_escapes) free(g.host_point_escapes);
   memset(&g, 0, sizeof(g));
 }
 
@@ -73,7 +80,7 @@ static void SetupSDL(void) {
     exit(1);
   }
   g.window = SDL_CreateWindow("Rendered image", SDL_WINDOWPOS_UNDEFINED,
-    SDL_WINDOWPOS_UNDEFINED, g.w, g.h, SDL_WINDOW_SHOWN |
+    SDL_WINDOWPOS_UNDEFINED, g.dimensions.w, g.dimensions.h, SDL_WINDOW_SHOWN |
     SDL_WINDOW_RESIZABLE);
   if (!g.window) {
     printf("Error creating SDL window: %s\n", SDL_GetError());
@@ -87,7 +94,7 @@ static void SetupSDL(void) {
     exit(1);
   }
   g.image = SDL_CreateTexture(g.renderer, SDL_PIXELFORMAT_RGBA8888,
-    SDL_TEXTUREACCESS_STREAMING, g.w, g.h);
+    SDL_TEXTUREACCESS_STREAMING, g.dimensions.w, g.dimensions.h);
   if (!g.image) {
     printf("Failed creating SDL texture: %s\n", SDL_GetError());
     exit(1);
@@ -97,72 +104,59 @@ static void SetupSDL(void) {
 // Allocates CUDA memory and calculates block/grid sizes. Must be called after
 // g.w and g.h have been set.
 static void SetupCUDA(void) {
-  size_t buffer_size = g.w * g.h * sizeof(float);
-  CheckCUDAError(cudaMalloc(&(g.device_data), buffer_size));
-  CheckCUDAError(cudaMemset(g.device_data, 0, buffer_size));
-  g.host_data = (float *) malloc(buffer_size);
-  if (!g.host_data) {
+  size_t buffer_size = g.dimensions.w * g.dimensions.h;
+  CheckCUDAError(cudaMalloc(&(g.device_point_escapes), buffer_size));
+  g.host_point_escapes = (uint8_t *) malloc(buffer_size);
+  if (!g.host_point_escapes) {
     printf("Failed allocating host buffer.\n");
     CleanupGlobals();
     exit(1);
   }
 }
 
-__global__ void FractalKernel(float *data, int iterations, int w, int h,
-    double min_real, double min_imag, double delta_real, double delta_imag) {
+// A basic mandelbrot set calculator which sets each element in data to 1 if
+// the point escapes within the given number of iterations.
+__global__ void BasicMandelbrot(uint8_t *data, int iterations,
+    FractalDimensions dimensions) {
   int index = (blockIdx.x * blockDim.x) + threadIdx.x;
-  int row = index / w;
-  int col = index % w;
-  // May desynchronize on the last block only.
-  if (row >= h) return;
-  double start_real = min_real + delta_real * row;
-  double start_imag = min_imag + delta_imag * col;
+  int row = index / dimensions.w;
+  int col = index % dimensions.w;
+  // This may cause some threads to diverge on the last block only
+  if (row >= dimensions.h) return;
+  double start_real = dimensions.min_real + dimensions.delta_real * col;
+  double start_imag = dimensions.min_imag + dimensions.delta_imag * row;
   double current_real = start_real;
   double current_imag = start_imag;
+  double magnitude_squared = (start_real * start_real) + (start_imag *
+    start_imag);
+  uint8_t escaped = 0;
   double tmp;
-  uint32_t i;
-  uint32_t escaped = 0;
-  float color;
-  float magnitude = (start_real * start_real) + (start_imag * start_imag);
-  // Z = Z^2 + C, where C is the starting value of this point.
+  int i;
   for (i = 0; i < iterations; i++) {
-    if (magnitude < 4) {
-      tmp = (current_real * current_real) - (current_imag * current_imag);
+    if (magnitude_squared < 4) {
+      tmp = (current_real * current_real) - (current_imag * current_imag) +
+        start_real;
       current_imag = 2 * current_imag * current_real + start_imag;
-      current_real = tmp + start_real;
-      color += expf(-magnitude);
-      magnitude = (current_real * current_real) + (current_imag *
+      current_real = tmp;
+      magnitude_squared = (current_real * current_real) + (current_imag *
         current_imag);
     } else {
-      // Smooth coloring from http://stackoverflow.com/questions/369438/
-      // smooth-spectrum-for-mandelbrot-set-rendering
-      //color = i - log2f(log2f(magnitude));
-      color = log(magnitude) / 2;
-      color = i - log(color / LOG2) / LOG2;
-      data[index] = color;
       escaped = 1;
     }
   }
-  if (!escaped) data[index] = 0;
+  data[row * dimensions.w + col] = escaped;
 }
 
 // Renders the fractal image.
 static void RenderImage(void) {
-  int block_size, block_count;
-  size_t data_size = g.w * g.h * sizeof(uint32_t);
-  block_size = DEFAULT_BLOCK_SIZE;
-  block_count = ((g.w * g.h) / block_size) + 1;
-  FractalKernel<<<block_count, block_size>>>(g.device_data, g.max_iterations,
-    g.w, g.h, g.min_real, g.min_imag, g.delta_real, g.delta_imag);
+  int block_count;
+  size_t data_size = g.dimensions.w * g.dimensions.h;
+  block_count = (data_size / DEFAULT_BLOCK_SIZE) + 1;
+  BasicMandelbrot<<<block_count, DEFAULT_BLOCK_SIZE>>>(g.device_point_escapes,
+    g.max_iterations, g.dimensions);
   CheckCUDAError(cudaGetLastError());
-  CheckCUDAError(cudaMemcpy(g.host_data, g.device_data, data_size,
-    cudaMemcpyDeviceToHost));
-}
-
-// Takes a floating-point value and converts it to an index into the color
-// palette.
-static uint8_t ColorIndex(float v) {
-  return ((uint32_t) v) % 255;
+  CheckCUDAError(cudaMemcpy(g.host_point_escapes, g.device_point_escapes,
+    data_size, cudaMemcpyDeviceToHost));
 }
 
 // Copies data from the host-side data buffer to the texture drawn to the SDL
@@ -173,7 +167,7 @@ static void UpdateDisplayedImage(void) {
   int image_pitch;
   int to_skip_per_row;
   uint8_t color_value;
-  float *host_data = g.host_data;
+  uint8_t *host_data = g.host_point_escapes;
   if (SDL_LockTexture(g.image, NULL, (void **) (&image_pixels), &image_pitch)
     < 0) {
     printf("Error locking SDL texture: %s\n", SDL_GetError());
@@ -182,15 +176,16 @@ static void UpdateDisplayedImage(void) {
   }
   // Abide by the image pitch, and skip unaffected bytes in each row.
   // (image_pitch should usually be equal to g.w * 4 anyway).
-  to_skip_per_row = image_pitch - (g.w * 4);
-  for (y = 0; y < g.h; y++) {
-    for (x = 0; x < g.w; x++) {
-      // The grey value scales linearly by the ratio of iterations to max
-      // iterations.
-      color_value = ColorIndex(*host_data);
+  to_skip_per_row = image_pitch - (g.dimensions.w * 4);
+  for (y = 0; y < g.dimensions.h; y++) {
+    for (x = 0; x < g.dimensions.w; x++) {
+      if (*host_data) {
+        color_value = 0xff;
+      } else {
+        color_value = 0;
+      }
       // The byte order is ABGR
       image_pixels[0] = 0xff;
-      // Draw this in 255 shades of gray for now.
       image_pixels[1] = color_value;
       image_pixels[2] = color_value;
       image_pixels[3] = color_value;
@@ -228,16 +223,20 @@ static void SDLWindowLoop(void) {
 }
 
 int main(int argc, char **argv) {
+  FractalDimensions *dimensions = NULL;
   memset(&g, 0, sizeof(g));
-  g.w = 1000;
-  g.h = 1000;
-  g.min_real = -2.0;
-  g.min_imag = -2.0;
-  g.max_real = 2.0;
-  g.max_imag = 2.0;
-  g.max_iterations = 100;
-  g.delta_real = (g.max_real - g.min_real) / ((double) g.w);
-  g.delta_imag = (g.max_imag - g.min_imag) / ((double) g.h);
+  dimensions = &(g.dimensions);
+  dimensions->w = 1000;
+  dimensions->h = 1000;
+  dimensions->min_real = -2.0;
+  dimensions->min_imag = -2.0;
+  dimensions->max_real = 2.0;
+  dimensions->max_imag = 2.0;
+  dimensions->delta_real = (dimensions->max_real - dimensions->min_real) /
+    ((double) dimensions->w);
+  dimensions->delta_imag = (dimensions->max_imag - dimensions->min_imag) /
+    ((double) dimensions->h);
+  g.max_iterations = 200;
   printf("Calculating image...\n");
   SetupCUDA();
   RenderImage();
