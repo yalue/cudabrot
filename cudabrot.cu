@@ -10,7 +10,7 @@ extern "C" {
 }
 
 // The number of CUDA threads to use per block.
-#define DEFAULT_BLOCK_SIZE (128)
+#define DEFAULT_BLOCK_SIZE (256)
 
 // The number of iterations to record the paths of points that escape the set.
 #define PATH_ITERATIONS (20000)
@@ -18,6 +18,10 @@ extern "C" {
 // This macro takes a cudaError_t value and exits the program if it isn't equal
 // to cudaSuccess. (Calls the ErrorCheck function, defined later).
 #define CheckCUDAError(val) (InternalCUDAErrorCheck((val), #val, __FILE__, __LINE__))
+
+// This will be a magic value instructing the program to not explicitly set a
+// CUDA device.
+#define USE_DEFAULT_DEVICE (-1)
 
 // Holds the boundaries and sizes of the fractal, in both pixels and numbers
 typedef struct {
@@ -46,6 +50,9 @@ static struct {
   SDL_Window *window;
   SDL_Renderer *renderer;
   SDL_Texture *image;
+  // The CUDA device to use. If this is -1, a device won't be set, which should
+  // fall back to CUDA's normal device.
+  int cuda_device;
   // The maximum number of iterations to run each point in the initial
   // mandelbrot calculation.
   int mandelbrot_iterations;
@@ -137,7 +144,9 @@ static void SetupSDL(void) {
 // Allocates CUDA memory and calculates block/grid sizes. Must be called after
 // g.w and g.h have been set.
 static void SetupCUDA(void) {
-  CheckCUDAError(cudaFree(0));
+  if (g.cuda_device != USE_DEFAULT_DEVICE) {
+    CheckCUDAError(cudaSetDevice(g.cuda_device));
+  }
   size_t buffer_size = g.dimensions.w * g.dimensions.h;
   CheckCUDAError(cudaMalloc(&(g.device_mandelbrot), buffer_size));
   CheckCUDAError(cudaMemset(g.device_mandelbrot, 0, buffer_size));
@@ -300,18 +309,18 @@ static void RenderImage(void) {
   printf("Buddhabrot took %f seconds.\n", CurrentSeconds() - seconds);
 }
 
-static double GetColorScale(void) {
-  // TODO: Figure out a color scaling system that works:
-  //  - Highest value should still be 255.
-  //  - Lowest value should be some pale gray
-  //  - Should have a lograthmic curve that amplifies low values a lot
-  return 16;
-}
-
 static uint8_t Clamp(double v) {
   if (v <= 0) return 0;
   if (v >= 255) return 255;
   return (uint8_t) v;
+}
+
+// Applies a log scale to c, so that 255 = 255, but smaller values are greatly
+// amplified.
+static uint8_t ScaleColor(uint8_t c) {
+  double scaled = c;
+  scaled = 255 * log(c + 1) / log(255);
+  return Clamp(scaled);
 }
 
 // Copies data from the host-side data buffer to the texture drawn to the SDL
@@ -322,7 +331,6 @@ static void UpdateDisplayedImage(void) {
   int image_pitch;
   int to_skip_per_row;
   uint8_t color_value;
-  double color_scale = GetColorScale();
   uint32_t *host_data = g.host_buddhabrot;
   if (SDL_LockTexture(g.image, NULL, (void **) (&image_pixels), &image_pitch)
     < 0) {
@@ -335,7 +343,7 @@ static void UpdateDisplayedImage(void) {
   to_skip_per_row = image_pitch - (g.dimensions.w * 4);
   for (y = 0; y < g.dimensions.h; y++) {
     for (x = 0; x < g.dimensions.w; x++) {
-      color_value = Clamp(color_scale * (*host_data));
+      color_value = ScaleColor(*host_data);
       // The byte order is ABGR
       image_pixels[0] = 0xff;
       image_pixels[1] = color_value;
@@ -392,11 +400,53 @@ static void SetResolution(int width, int height) {
   dims->delta_real = real_width / ((double) width);
 }
 
+static void PrintUsage(char *program_name) {
+  printf("Usage: %s [options]\n\n", program_name);
+  printf("Options may be one or more of the following:\n"
+    "  -h, --help: Prints these instructions.\n"
+    "  -d <CUDA device number>: Can be used to set which GPU to use.\n"
+    "    Defaults to the default GPU.\n");
+  exit(0);
+}
+
+// Processes command-line arguments, setting values in the globals struct as
+// necessary.
+static void ParseArguments(int argc, char **argv) {
+  char *tmp = NULL;
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "-h") == 0) {
+      PrintUsage(argv[0]);
+    }
+    if (strcmp(argv[i], "--help") == 0) {
+      PrintUsage(argv[0]);
+    }
+    if (strcmp(argv[i], "-d") == 0) {
+      if ((i + 1) >= argc) {
+        printf("Missing GPU device number.\n");
+        PrintUsage(argv[0]);
+      }
+      i++;
+      g.cuda_device = strtol(argv[i], &tmp, 10);
+      if (*tmp != 0) {
+        printf("Invalid GPU device number: %s\n", argv[i]);
+        PrintUsage(argv[0]);
+      }
+      continue;
+    }
+    // Unrecognized argument, print the usage string.
+    printf("Invalid argument: %s\n", argv[i]);
+    PrintUsage(argv[0]);
+  }
+}
+
 int main(int argc, char **argv) {
   memset(&g, 0, sizeof(g));
+  //SetResolution(1000, 1000);
   SetResolution(3840, 2400);
-  g.mandelbrot_iterations = 100;
+  g.mandelbrot_iterations = 20000;
   g.buddhabrot_iterations = 20000;
+  g.cuda_device = USE_DEFAULT_DEVICE;
+  ParseArguments(argc, argv);
   printf("Calculating image...\n");
   SetupCUDA();
   RenderImage();
