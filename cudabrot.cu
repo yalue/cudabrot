@@ -268,71 +268,6 @@ __global__ void DrawBuddhabrot(EscapingPoint *points, int point_count,
   }
 }
 
-// For testing. Draws the mandelbrot set using the CPU only.
-static void CPUMandelbrot(void) {
-  FractalDimensions *dims = &(g.dimensions);
-  int x, y, w, h, i;
-  double start_real, start_imag, current_real, current_imag, tmp, magnitude;
-  // Used to detect cycles.
-  double prev_real, prev_imag;
-  w = dims->w;
-  h = dims->h;
-  for (y = 0; y < h; y++) {
-    start_imag = dims->min_imag + y * dims->delta_imag;
-    for (x = 0; x < w; x++) {
-      start_real = dims->min_real + x * dims->delta_real;
-      current_real = start_real;
-      current_imag = start_imag;
-      prev_real = start_real;
-      prev_imag = start_imag;
-      for (i = 0; i < g.mandelbrot_iterations; i++) {
-        tmp = (current_real * current_real) - (current_imag * current_imag) +
-          start_real;
-        current_imag = 2 * current_real * current_imag + start_imag;
-        current_real = tmp;
-        magnitude = (current_real * current_real) + (current_imag *
-          current_imag);
-        // Escape detected, move to next point.
-        if (magnitude > 4) {
-          g.host_mandelbrot[y * w + x] = 1;
-          break;
-        }
-        // Cycle detected, move to next point.
-        if ((current_real == prev_real) && (current_imag == prev_imag)) {
-          break;
-        }
-        prev_real = current_real;
-        prev_imag = current_imag;
-      }
-    }
-  }
-}
-
-// For testing. Draws the buddhabrot using the CPU only.
-static void CPUBuddhabrot(void) {
-  FractalDimensions *dims = &(g.dimensions);
-  int i, iteration, row, col;
-  EscapingPoint *points = g.host_escaping_points;
-  double start_real, start_imag, current_real, current_imag, tmp;
-  for (i = 0; i < g.escaping_point_count; i++) {
-    start_real = points[i].real;
-    start_imag = points[i].imag;
-    current_real = start_real;
-    current_imag = start_imag;
-    for (iteration = 0; iteration < g.buddhabrot_iterations; iteration++) {
-      tmp = (current_real * current_real) - (current_imag * current_imag) +
-        start_real;
-      current_imag = 2 * current_real * current_imag + start_imag;
-      current_real = tmp;
-      row = (current_imag - dims->min_imag) / dims->delta_imag;
-      col = (current_real - dims->min_real) / dims->delta_real;
-      if ((row >= 0) && (row < dims->h) && (col >= 0) && (col < dims->w)) {
-        g.host_buddhabrot[row * dims->w + col]++;
-      }
-    }
-  }
-}
-
 // Renders the fractal image.
 static void RenderImage(void) {
   int block_count;
@@ -349,9 +284,6 @@ static void RenderImage(void) {
   CheckCUDAError(cudaMemcpy(g.host_mandelbrot, g.device_mandelbrot,
     data_size, cudaMemcpyDeviceToHost));
   printf("Mandelbrot took %f seconds.\n", CurrentSeconds() - seconds);
-  seconds = CurrentSeconds();
-  CPUMandelbrot();
-  printf("CPU version took %f seconds.\n", CurrentSeconds() - seconds);
 
   printf("Finding start points for buddhabrot.\n");
   GatherEscapingPoints();
@@ -366,11 +298,6 @@ static void RenderImage(void) {
   CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
     data_size * sizeof(uint32_t), cudaMemcpyDeviceToHost));
   printf("Buddhabrot took %f seconds.\n", CurrentSeconds() - seconds);
-
-  memset(g.host_buddhabrot, 0, data_size * sizeof(uint32_t));
-  seconds = CurrentSeconds();
-  CPUBuddhabrot();
-  printf("CPU buddhabrot took %f seconds.\n", CurrentSeconds() - seconds);
 }
 
 static double GetColorScale(void) {
@@ -447,22 +374,29 @@ static void SDLWindowLoop(void) {
   }
 }
 
+// Sets the resolution, scaling the complex boundaries to maintain an aspect
+// ratio.
+static void SetResolution(int width, int height) {
+  FractalDimensions *dims = &(g.dimensions);
+  double ratio = ((double) height) / ((double) width);
+  // The horizontal width for which the complex plane is shown.
+  double real_width = 4.0;
+  double imag_width = real_width * ratio;
+  dims->w = width;
+  dims->h = height;
+  dims->min_real = -(real_width / 2.0);
+  dims->max_real = dims->min_real + real_width;
+  dims->min_imag = -(imag_width / 2.0);
+  dims->max_imag = dims->min_imag + imag_width;
+  dims->delta_imag = imag_width / ((double) height);
+  dims->delta_real = real_width / ((double) width);
+}
+
 int main(int argc, char **argv) {
-  FractalDimensions *dimensions = NULL;
   memset(&g, 0, sizeof(g));
-  dimensions = &(g.dimensions);
-  dimensions->w = 1000;
-  dimensions->h = 1000;
-  dimensions->min_real = -2.0;
-  dimensions->min_imag = -2.0;
-  dimensions->max_real = 2.0;
-  dimensions->max_imag = 2.0;
-  dimensions->delta_real = (dimensions->max_real - dimensions->min_real) /
-    ((double) dimensions->w);
-  dimensions->delta_imag = (dimensions->max_imag - dimensions->min_imag) /
-    ((double) dimensions->h);
+  SetResolution(3840, 2400);
   g.mandelbrot_iterations = 100;
-  g.buddhabrot_iterations = 1000;
+  g.buddhabrot_iterations = 20000;
   printf("Calculating image...\n");
   SetupCUDA();
   RenderImage();
