@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 extern "C" {
 #include <SDL2/SDL.h>
@@ -82,6 +83,16 @@ static void CleanupGlobals(void) {
   memset(&g, 0, sizeof(g));
 }
 
+// Returns the current time in seconds.
+static double CurrentSeconds(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+    printf("Error getting time.\n");
+    exit(1);
+  }
+  return ((double) ts.tv_sec) + (((double) ts.tv_nsec) / 1e9);
+}
+
 // Prints an error message and exits the program if the cudaError_t value is
 // not equal to cudaSuccess. Generally, this will be called via the
 // CheckCudaError macro.
@@ -126,6 +137,7 @@ static void SetupSDL(void) {
 // Allocates CUDA memory and calculates block/grid sizes. Must be called after
 // g.w and g.h have been set.
 static void SetupCUDA(void) {
+  CheckCUDAError(cudaFree(0));
   size_t buffer_size = g.dimensions.w * g.dimensions.h;
   CheckCUDAError(cudaMalloc(&(g.device_mandelbrot), buffer_size));
   CheckCUDAError(cudaMemset(g.device_mandelbrot, 0, buffer_size));
@@ -135,6 +147,7 @@ static void SetupCUDA(void) {
     CleanupGlobals();
     exit(1);
   }
+  memset(g.host_mandelbrot, 0, buffer_size);
   CheckCUDAError(cudaMalloc(&(g.device_buddhabrot), buffer_size *
     sizeof(uint32_t)));
   CheckCUDAError(cudaMemset(g.device_buddhabrot, 0, buffer_size *
@@ -145,6 +158,7 @@ static void SetupCUDA(void) {
     CleanupGlobals();
     exit(1);
   }
+  memset(g.host_buddhabrot, 0, buffer_size * sizeof(uint32_t));
 }
 
 // A basic mandelbrot set calculator which sets each element in data to 1 if
@@ -254,34 +268,109 @@ __global__ void DrawBuddhabrot(EscapingPoint *points, int point_count,
   }
 }
 
+// For testing. Draws the mandelbrot set using the CPU only.
+static void CPUMandelbrot(void) {
+  FractalDimensions *dims = &(g.dimensions);
+  int x, y, w, h, i;
+  double start_real, start_imag, current_real, current_imag, tmp, magnitude;
+  // Used to detect cycles.
+  double prev_real, prev_imag;
+  w = dims->w;
+  h = dims->h;
+  for (y = 0; y < h; y++) {
+    start_imag = dims->min_imag + y * dims->delta_imag;
+    for (x = 0; x < w; x++) {
+      start_real = dims->min_real + x * dims->delta_real;
+      current_real = start_real;
+      current_imag = start_imag;
+      prev_real = start_real;
+      prev_imag = start_imag;
+      for (i = 0; i < g.mandelbrot_iterations; i++) {
+        tmp = (current_real * current_real) - (current_imag * current_imag) +
+          start_real;
+        current_imag = 2 * current_real * current_imag + start_imag;
+        current_real = tmp;
+        magnitude = (current_real * current_real) + (current_imag *
+          current_imag);
+        // Escape detected, move to next point.
+        if (magnitude > 4) {
+          g.host_mandelbrot[y * w + x] = 1;
+          break;
+        }
+        // Cycle detected, move to next point.
+        if ((current_real == prev_real) && (current_imag == prev_imag)) {
+          break;
+        }
+        prev_real = current_real;
+        prev_imag = current_imag;
+      }
+    }
+  }
+}
+
+// For testing. Draws the buddhabrot using the CPU only.
+static void CPUBuddhabrot(void) {
+  FractalDimensions *dims = &(g.dimensions);
+  int i, iteration, row, col;
+  EscapingPoint *points = g.host_escaping_points;
+  double start_real, start_imag, current_real, current_imag, tmp;
+  for (i = 0; i < g.escaping_point_count; i++) {
+    start_real = points[i].real;
+    start_imag = points[i].imag;
+    current_real = start_real;
+    current_imag = start_imag;
+    for (iteration = 0; iteration < g.buddhabrot_iterations; iteration++) {
+      tmp = (current_real * current_real) - (current_imag * current_imag) +
+        start_real;
+      current_imag = 2 * current_real * current_imag + start_imag;
+      current_real = tmp;
+      row = (current_imag - dims->min_imag) / dims->delta_imag;
+      col = (current_real - dims->min_real) / dims->delta_real;
+      if ((row >= 0) && (row < dims->h) && (col >= 0) && (col < dims->w)) {
+        g.host_buddhabrot[row * dims->w + col]++;
+      }
+    }
+  }
+}
+
 // Renders the fractal image.
 static void RenderImage(void) {
   int block_count;
   size_t data_size = g.dimensions.w * g.dimensions.h;
+  double seconds;
 
+  printf("Calculating initial mandelbrot set.\n");
   // First, draw the basic mandelbrot to get which points escape.
   block_count = (data_size / DEFAULT_BLOCK_SIZE) + 1;
+  seconds = CurrentSeconds();
   BasicMandelbrot<<<block_count, DEFAULT_BLOCK_SIZE>>>(g.device_mandelbrot,
     g.mandelbrot_iterations, g.dimensions);
   CheckCUDAError(cudaGetLastError());
   CheckCUDAError(cudaMemcpy(g.host_mandelbrot, g.device_mandelbrot,
     data_size, cudaMemcpyDeviceToHost));
+  printf("Mandelbrot took %f seconds.\n", CurrentSeconds() - seconds);
+  seconds = CurrentSeconds();
+  CPUMandelbrot();
+  printf("CPU version took %f seconds.\n", CurrentSeconds() - seconds);
 
-  // Next, get the list of points that escape.
+  printf("Finding start points for buddhabrot.\n");
   GatherEscapingPoints();
-  EscapingPoint p = g.host_escaping_points[g.escaping_point_count - 1];
-  int row = (p.imag - g.dimensions.min_imag) / g.dimensions.delta_imag;
-  int col = (p.real - g.dimensions.min_real) / g.dimensions.delta_real;
-  printf("Escaping point %f,%f: row %d, col %d\n", p.real, p.imag, row, col);
 
-  // Finally, draw the Buddhabrot
+  printf("Calculating buddhabrot.\n");
   block_count = (g.escaping_point_count / DEFAULT_BLOCK_SIZE) + 1;
+  seconds = CurrentSeconds();
   DrawBuddhabrot<<<block_count, DEFAULT_BLOCK_SIZE>>>(g.device_escaping_points,
     g.escaping_point_count, g.device_buddhabrot, g.buddhabrot_iterations,
     g.dimensions);
   CheckCUDAError(cudaGetLastError());
   CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
     data_size * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+  printf("Buddhabrot took %f seconds.\n", CurrentSeconds() - seconds);
+
+  memset(g.host_buddhabrot, 0, data_size * sizeof(uint32_t));
+  seconds = CurrentSeconds();
+  CPUBuddhabrot();
+  printf("CPU buddhabrot took %f seconds.\n", CurrentSeconds() - seconds);
 }
 
 static double GetColorScale(void) {
@@ -373,7 +462,7 @@ int main(int argc, char **argv) {
   dimensions->delta_imag = (dimensions->max_imag - dimensions->min_imag) /
     ((double) dimensions->h);
   g.mandelbrot_iterations = 100;
-  g.buddhabrot_iterations = 10000;
+  g.buddhabrot_iterations = 1000;
   printf("Calculating image...\n");
   SetupCUDA();
   RenderImage();
