@@ -53,6 +53,9 @@ static struct {
   // The CUDA device to use. If this is -1, a device won't be set, which should
   // fall back to CUDA's normal device.
   int cuda_device;
+  // The filename to which a bitmap image will be saved, or NULL if an image
+  // should not be saved.
+  char *output_image;
   // The maximum number of iterations to run each point in the initial
   // mandelbrot calculation.
   int mandelbrot_iterations;
@@ -66,6 +69,10 @@ static struct {
   uint8_t *device_mandelbrot;
   // The host-side copy of the basic binary mandelbrot set.
   uint8_t *host_mandelbrot;
+  // This determines the number of samples each mandelbrot point gets in the
+  // buddhabrot. Differing samples will occur at random offsets within the
+  // mandelbrot "pixel". If this is 0 or 1, no oversampling is used.
+  uint32_t oversampling_amount;
   // Lists of points which escape the mandelbrot set.
   EscapingPoint *host_escaping_points;
   EscapingPoint *device_escaping_points;
@@ -98,6 +105,11 @@ static double CurrentSeconds(void) {
     exit(1);
   }
   return ((double) ts.tv_sec) + (((double) ts.tv_nsec) / 1e9);
+}
+
+// Returns a random floating-point number in the range [0, 1).
+static double RandomFloat(void) {
+  return ((double) rand()) / ((double) RAND_MAX);
 }
 
 // Prints an error message and exits the program if the cudaError_t value is
@@ -209,18 +221,24 @@ __global__ void BasicMandelbrot(uint8_t *data, int iterations,
 static void GatherEscapingPoints(void) {
   int w = g.dimensions.w;
   int h = g.dimensions.h;
-  int x, y;
+  int x, y, i;
   size_t points_size = 0;
   int points_added = 0;
   EscapingPoint *escaping_point = NULL;
+  int oversamples = g.oversampling_amount;
 
   // First, get a count of the escaping points, so the correct amount of memory
-  // can be allocated.
+  // can be allocated. We apply oversampling at this step.
   int count = 0;
   for (y = 0; y < h; y++) {
     for (x = 0; x < w; x++) {
       if (g.host_mandelbrot[y * w + x]) count++;
     }
+  }
+  if (oversamples) {
+    count *= oversamples;
+  } else {
+    oversamples = 1;
   }
   g.escaping_point_count = count;
 
@@ -237,11 +255,17 @@ static void GatherEscapingPoints(void) {
     for (x = 0; x < w; x++) {
       if (!g.host_mandelbrot[y * w + x]) continue;
       escaping_point = g.host_escaping_points + points_added;
-      escaping_point->real = ((double) x) * g.dimensions.delta_real +
-        g.dimensions.min_real;
-      escaping_point->imag = ((double) y) * g.dimensions.delta_imag +
-        g.dimensions.min_imag;
-      points_added++;
+      for (i = 0; i < oversamples; i++) {
+        escaping_point->real = ((double) x) * g.dimensions.delta_real +
+          g.dimensions.min_real;
+        escaping_point->imag = ((double) y) * g.dimensions.delta_imag +
+          g.dimensions.min_imag;
+        // Adding random jitter so the oversamples will be on different points.
+        // TODO: Don't add any jitter if oversamples are 0 or 1.
+        escaping_point->real += RandomFloat() * g.dimensions.delta_real;
+        escaping_point->imag += RandomFloat() * g.dimensions.delta_imag;
+        points_added++;
+      }
     }
   }
   CheckCUDAError(cudaMemcpy(g.device_escaping_points, g.host_escaping_points,
@@ -400,19 +424,91 @@ static void SetResolution(int width, int height) {
   dims->delta_real = real_width / ((double) width);
 }
 
+// If a filename has been set for saving the image, this will attempt to save
+// the image to the file.
+static void SaveImage(void) {
+  void *pixel_data;
+  SDL_Surface *image_surface = NULL;
+  int w = g.dimensions.w;
+  int h = g.dimensions.h;
+  // Don't do anything if the output filename wasn't set.
+  if (!g.output_image) return;
+
+  // In SDL 2, we need to copy the image from the renderer and create an SDL
+  // surface in order to save a bitmap.
+  pixel_data = malloc(w * h * 4);
+  if (!pixel_data) {
+    printf("Failed allocating space to save an image.\n");
+    CleanupGlobals();
+    exit(1);
+  }
+  if (SDL_RenderReadPixels(g.renderer, NULL, SDL_PIXELFORMAT_RGBA8888,
+    pixel_data, w * 4) != 0) {
+    printf("Failed getting BMP image data: %s\n", SDL_GetError());
+    free(pixel_data);
+    CleanupGlobals();
+    exit(1);
+  }
+  image_surface = SDL_CreateRGBSurfaceFrom(pixel_data, w, h, 32, w * 4, 0xff,
+    0xff00, 0xff0000, 0xff000000);
+  if (!image_surface) {
+    printf("Failed creating BMP surface: %s\n", SDL_GetError());
+    free(pixel_data);
+    CleanupGlobals();
+    exit(1);
+  }
+  if (SDL_SaveBMP(image_surface, g.output_image) != 0) {
+    printf("Failed saving BMP file: %s\n", SDL_GetError());
+    SDL_FreeSurface(image_surface);
+    free(pixel_data);
+    CleanupGlobals();
+    exit(1);
+  }
+  printf("Successfully saved %s\n", g.output_image);
+  SDL_FreeSurface(image_surface);
+  free(pixel_data);
+}
+
 static void PrintUsage(char *program_name) {
   printf("Usage: %s [options]\n\n", program_name);
   printf("Options may be one or more of the following:\n"
     "  -h, --help: Prints these instructions.\n"
     "  -d <CUDA device number>: Can be used to set which GPU to use.\n"
-    "    Defaults to the default GPU.\n");
+    "     Defaults to the default GPU.\n"
+    "  -s <output file name>: If provided, the rendered image will be saved\n"
+    "     to a bitmap file with the given name, in addition to being\n"
+    "     displayed in a window.\n"
+    "  -o <oversamples>: If provided, the buddhabrot calculation will use\n"
+    "     the given number of samples at random points within each escaping\n"
+    "     pixel from the original mandelbrot set. Defaults to 1.\n"
+    "  -i <mandelbrot iterations>: The number of iterations to use for the\n"
+    "     mandelbrot set. Defaults to 1000.\n"
+    "  -b <buddhabrot iterations>: The number of iterations to use for the\n"
+    "     buddhabrot calculation. Defaults to 1000.\n");
   exit(0);
+}
+
+// Returns an integer at the argument after index in argv. Exits if the integer
+// is invalid.
+static int ParseIntArg(int argc, char **argv, int index) {
+  char *tmp = NULL;
+  int to_return = 0;
+  if ((index + 1) >= argc) {
+    printf("Argument %s needs a value.\n", argv[index]);
+    PrintUsage(argv[0]);
+  }
+  to_return = strtol(argv[index + 1], &tmp, 10);
+  if (*tmp != 0) {
+    printf("Invalid number given to argument %s: %s\n", argv[index],
+      argv[index + 1]);
+    PrintUsage(argv[0]);
+  }
+  return to_return;
 }
 
 // Processes command-line arguments, setting values in the globals struct as
 // necessary.
 static void ParseArguments(int argc, char **argv) {
-  char *tmp = NULL;
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-h") == 0) {
       PrintUsage(argv[0]);
@@ -421,16 +517,32 @@ static void ParseArguments(int argc, char **argv) {
       PrintUsage(argv[0]);
     }
     if (strcmp(argv[i], "-d") == 0) {
+      g.cuda_device = ParseIntArg(argc, argv, i);
+      i++;
+      continue;
+    }
+    if (strcmp(argv[i], "-s") == 0) {
       if ((i + 1) >= argc) {
-        printf("Missing GPU device number.\n");
+        printf("Missing output file name.\n");
         PrintUsage(argv[0]);
       }
       i++;
-      g.cuda_device = strtol(argv[i], &tmp, 10);
-      if (*tmp != 0) {
-        printf("Invalid GPU device number: %s\n", argv[i]);
-        PrintUsage(argv[0]);
-      }
+      g.output_image = argv[i];
+      continue;
+    }
+    if (strcmp(argv[i], "-o") == 0) {
+      g.oversampling_amount = ParseIntArg(argc, argv, i);
+      i++;
+      continue;
+    }
+    if (strcmp(argv[i], "-i") == 0) {
+      g.mandelbrot_iterations = ParseIntArg(argc, argv, i);
+      i++;
+      continue;
+    }
+    if (strcmp(argv[i], "-b") == 0) {
+      g.buddhabrot_iterations = ParseIntArg(argc, argv, i);
+      i++;
       continue;
     }
     // Unrecognized argument, print the usage string.
@@ -441,10 +553,10 @@ static void ParseArguments(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   memset(&g, 0, sizeof(g));
-  //SetResolution(1000, 1000);
-  SetResolution(3840, 2400);
-  g.mandelbrot_iterations = 20000;
-  g.buddhabrot_iterations = 20000;
+  SetResolution(1000, 1000);
+  //SetResolution(3840, 2400);
+  g.mandelbrot_iterations = 1000;
+  g.buddhabrot_iterations = 1000;
   g.cuda_device = USE_DEFAULT_DEVICE;
   ParseArguments(argc, argv);
   printf("Calculating image...\n");
@@ -453,6 +565,7 @@ int main(int argc, char **argv) {
   printf("Done!\n");
   SetupSDL();
   SDLWindowLoop();
+  SaveImage();
   CleanupGlobals();
   return 0;
 }
