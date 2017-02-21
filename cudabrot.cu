@@ -23,6 +23,10 @@ extern "C" {
 // CUDA device.
 #define USE_DEFAULT_DEVICE (-1)
 
+// The gamma value to use for gamma correction, or 1.0 if no gamma correction
+// should be applied.
+#define GAMMA_CORRECTION (1.2)
+
 // Holds the boundaries and sizes of the fractal, in both pixels and numbers
 typedef struct {
   // The width and height of the image in pixels.
@@ -69,10 +73,6 @@ static struct {
   uint8_t *device_mandelbrot;
   // The host-side copy of the basic binary mandelbrot set.
   uint8_t *host_mandelbrot;
-  // This determines the number of samples each mandelbrot point gets in the
-  // buddhabrot. Differing samples will occur at random offsets within the
-  // mandelbrot "pixel". If this is 0 or 1, no oversampling is used.
-  uint32_t oversampling_amount;
   // Lists of points which escape the mandelbrot set.
   EscapingPoint *host_escaping_points;
   EscapingPoint *device_escaping_points;
@@ -105,11 +105,6 @@ static double CurrentSeconds(void) {
     exit(1);
   }
   return ((double) ts.tv_sec) + (((double) ts.tv_nsec) / 1e9);
-}
-
-// Returns a random floating-point number in the range [0, 1).
-static double RandomFloat(void) {
-  return ((double) rand()) / ((double) RAND_MAX);
 }
 
 // Prints an error message and exits the program if the cudaError_t value is
@@ -221,11 +216,10 @@ __global__ void BasicMandelbrot(uint8_t *data, int iterations,
 static void GatherEscapingPoints(void) {
   int w = g.dimensions.w;
   int h = g.dimensions.h;
-  int x, y, i;
+  int x, y;
   size_t points_size = 0;
   int points_added = 0;
   EscapingPoint *escaping_point = NULL;
-  int oversamples = g.oversampling_amount;
 
   // First, get a count of the escaping points, so the correct amount of memory
   // can be allocated. We apply oversampling at this step.
@@ -234,11 +228,6 @@ static void GatherEscapingPoints(void) {
     for (x = 0; x < w; x++) {
       if (g.host_mandelbrot[y * w + x]) count++;
     }
-  }
-  if (oversamples) {
-    count *= oversamples;
-  } else {
-    oversamples = 1;
   }
   g.escaping_point_count = count;
 
@@ -255,17 +244,11 @@ static void GatherEscapingPoints(void) {
     for (x = 0; x < w; x++) {
       if (!g.host_mandelbrot[y * w + x]) continue;
       escaping_point = g.host_escaping_points + points_added;
-      for (i = 0; i < oversamples; i++) {
-        escaping_point->real = ((double) x) * g.dimensions.delta_real +
-          g.dimensions.min_real;
-        escaping_point->imag = ((double) y) * g.dimensions.delta_imag +
-          g.dimensions.min_imag;
-        // Adding random jitter so the oversamples will be on different points.
-        // TODO: Don't add any jitter if oversamples are 0 or 1.
-        escaping_point->real += RandomFloat() * g.dimensions.delta_real;
-        escaping_point->imag += RandomFloat() * g.dimensions.delta_imag;
-        points_added++;
-      }
+      escaping_point->real = ((double) x) * g.dimensions.delta_real +
+        g.dimensions.min_real;
+      escaping_point->imag = ((double) y) * g.dimensions.delta_imag +
+        g.dimensions.min_imag;
+      points_added++;
     }
   }
   CheckCUDAError(cudaMemcpy(g.device_escaping_points, g.host_escaping_points,
@@ -339,12 +322,27 @@ static uint8_t Clamp(double v) {
   return (uint8_t) v;
 }
 
-// Applies a log scale to c, so that 255 = 255, but smaller values are greatly
-// amplified.
-static uint8_t ScaleColor(uint8_t c) {
-  double scaled = c;
+// Returns the amount to multiply the original count by in order to get a value
+// by which buddhabrot counts can be multiplied to get a number between 0 and
+// 255.
+static double GetLinearColorScale(void) {
+  int x, y, index;
+  uint32_t max = 0;
+  index = 0;
+  for (y = 0; y < g.dimensions.h; y++) {
+    for (x = 0; x < g.dimensions.w; x++) {
+      if (g.host_buddhabrot[index] > max) max = g.host_buddhabrot[index];
+    }
+  }
+  return 255.0 / ((double) max);
+}
+
+// Returns the gamma-corrected 8-bit color channel value given a buddhabrot
+// iteration count c.
+static uint8_t DoGammaCorrection(uint32_t c, double linear_scale) {
+  double scaled = ((double) c) * linear_scale;
   scaled = 255 * log(c + 1) / log(255);
-  return Clamp(scaled);
+  return Clamp(255 * pow(scaled / 255, 1 / GAMMA_CORRECTION));
 }
 
 // Copies data from the host-side data buffer to the texture drawn to the SDL
@@ -355,6 +353,7 @@ static void UpdateDisplayedImage(void) {
   int image_pitch;
   int to_skip_per_row;
   uint8_t color_value;
+  double linear_scale = GetLinearColorScale();
   uint32_t *host_data = g.host_buddhabrot;
   if (SDL_LockTexture(g.image, NULL, (void **) (&image_pixels), &image_pitch)
     < 0) {
@@ -367,7 +366,7 @@ static void UpdateDisplayedImage(void) {
   to_skip_per_row = image_pitch - (g.dimensions.w * 4);
   for (y = 0; y < g.dimensions.h; y++) {
     for (x = 0; x < g.dimensions.w; x++) {
-      color_value = ScaleColor(*host_data);
+      color_value = DoGammaCorrection(*host_data, linear_scale);
       // The byte order is ABGR
       image_pixels[0] = 0xff;
       image_pixels[1] = color_value;
@@ -478,9 +477,6 @@ static void PrintUsage(char *program_name) {
     "  -s <output file name>: If provided, the rendered image will be saved\n"
     "     to a bitmap file with the given name, in addition to being\n"
     "     displayed in a window.\n"
-    "  -o <oversamples>: If provided, the buddhabrot calculation will use\n"
-    "     the given number of samples at random points within each escaping\n"
-    "     pixel from the original mandelbrot set. Defaults to 1.\n"
     "  -i <mandelbrot iterations>: The number of iterations to use for the\n"
     "     mandelbrot set. Defaults to 1000.\n"
     "  -b <buddhabrot iterations>: The number of iterations to use for the\n"
@@ -528,11 +524,6 @@ static void ParseArguments(int argc, char **argv) {
       }
       i++;
       g.output_image = argv[i];
-      continue;
-    }
-    if (strcmp(argv[i], "-o") == 0) {
-      g.oversampling_amount = ParseIntArg(argc, argv, i);
-      i++;
       continue;
     }
     if (strcmp(argv[i], "-i") == 0) {
