@@ -27,6 +27,9 @@ extern "C" {
 // should be applied.
 #define GAMMA_CORRECTION (1.2)
 
+// The number of color channels in the resulting image. Should be 3 for RBG.
+#define COLOR_CHANNELS (3)
+
 // Holds the boundaries and sizes of the fractal, in both pixels and numbers
 typedef struct {
   // The width and height of the image in pixels.
@@ -82,11 +85,15 @@ static struct {
   // point's path crossed each point in the complex plane.
   uint32_t *device_buddhabrot;
   uint32_t *host_buddhabrot;
+  // Buffers for the three different color channels, which will be calculated
+  // separately and combined into the final image.
+  uint8_t *color_channels[COLOR_CHANNELS];
 } g;
 
 // If any globals have been initialized, this will free them. (Relies on
 // globals being set to 0 at the start of the program)
 static void CleanupGlobals(void) {
+  int i;
   if (g.renderer) SDL_DestroyRenderer(g.renderer);
   if (g.image) SDL_DestroyTexture(g.image);
   if (g.window) SDL_DestroyWindow(g.window);
@@ -94,6 +101,9 @@ static void CleanupGlobals(void) {
   if (g.host_mandelbrot) free(g.host_mandelbrot);
   if (g.host_escaping_points) free(g.host_escaping_points);
   if (g.device_escaping_points) cudaFree(g.device_escaping_points);
+  for (i = 0; i < COLOR_CHANNELS; i++) {
+    if (g.color_channels[i]) free(g.color_channels[i]);
+  }
   memset(&g, 0, sizeof(g));
 }
 
@@ -151,6 +161,7 @@ static void SetupSDL(void) {
 // Allocates CUDA memory and calculates block/grid sizes. Must be called after
 // g.w and g.h have been set.
 static void SetupCUDA(void) {
+  int i;
   if (g.cuda_device != USE_DEFAULT_DEVICE) {
     CheckCUDAError(cudaSetDevice(g.cuda_device));
   }
@@ -175,6 +186,16 @@ static void SetupCUDA(void) {
     exit(1);
   }
   memset(g.host_buddhabrot, 0, buffer_size * sizeof(uint32_t));
+
+  for (i = 0; i < COLOR_CHANNELS; i++) {
+    g.color_channels[i] = (uint8_t *) malloc(buffer_size);
+    if (!g.color_channels[i]) {
+      printf("Failed allocating color channel %d buffer.\n", i);
+      CleanupGlobals();
+      exit(1);
+    }
+    memset(g.color_channels[i], 0, buffer_size);
+  }
 }
 
 // A basic mandelbrot set calculator which sets each element in data to 1 if
@@ -284,38 +305,6 @@ __global__ void DrawBuddhabrot(EscapingPoint *points, int point_count,
   }
 }
 
-// Renders the fractal image.
-static void RenderImage(void) {
-  int block_count;
-  size_t data_size = g.dimensions.w * g.dimensions.h;
-  double seconds;
-
-  printf("Calculating initial mandelbrot set.\n");
-  // First, draw the basic mandelbrot to get which points escape.
-  block_count = (data_size / DEFAULT_BLOCK_SIZE) + 1;
-  seconds = CurrentSeconds();
-  BasicMandelbrot<<<block_count, DEFAULT_BLOCK_SIZE>>>(g.device_mandelbrot,
-    g.mandelbrot_iterations, g.dimensions);
-  CheckCUDAError(cudaGetLastError());
-  CheckCUDAError(cudaMemcpy(g.host_mandelbrot, g.device_mandelbrot,
-    data_size, cudaMemcpyDeviceToHost));
-  printf("Mandelbrot took %f seconds.\n", CurrentSeconds() - seconds);
-
-  printf("Finding start points for buddhabrot.\n");
-  GatherEscapingPoints();
-
-  printf("Calculating buddhabrot.\n");
-  block_count = (g.escaping_point_count / DEFAULT_BLOCK_SIZE) + 1;
-  seconds = CurrentSeconds();
-  DrawBuddhabrot<<<block_count, DEFAULT_BLOCK_SIZE>>>(g.device_escaping_points,
-    g.escaping_point_count, g.device_buddhabrot, g.buddhabrot_iterations,
-    g.dimensions);
-  CheckCUDAError(cudaGetLastError());
-  CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
-    data_size * sizeof(uint32_t), cudaMemcpyDeviceToHost));
-  printf("Buddhabrot took %f seconds.\n", CurrentSeconds() - seconds);
-}
-
 static uint8_t Clamp(double v) {
   if (v <= 0) return 0;
   if (v >= 255) return 255;
@@ -345,16 +334,71 @@ static uint8_t DoGammaCorrection(uint32_t c, double linear_scale) {
   return Clamp(255 * pow(scaled / 255, 1 / GAMMA_CORRECTION));
 }
 
+// Fills in a single color channel from the current host_buddhabrot buffer.
+static void SetColorChannel(uint8_t *color) {
+  int x, y;
+  uint8_t color_value;
+  double linear_scale = GetLinearColorScale();
+  uint32_t *host_data = g.host_buddhabrot;
+  for (y = 0; y < g.dimensions.h; y++) {
+    for (x = 0; x < g.dimensions.w; x++) {
+      color_value = DoGammaCorrection(*host_data, linear_scale);
+      *color = color_value;
+      color++;
+      host_data++;
+    }
+  }
+}
+
+// Renders the fractal image.
+static void RenderImage(void) {
+  int block_count, channel;
+  size_t data_size = g.dimensions.w * g.dimensions.h;
+  double seconds;
+  int mandelbrot_iterations = g.mandelbrot_iterations;
+  int buddhabrot_iterations = g.buddhabrot_iterations;
+
+  for (channel = 0; channel < COLOR_CHANNELS; channel++) {
+    printf("Calculating color channel %d.\n", channel);
+
+    // First, draw the basic mandelbrot to get which points escape.
+    printf("  Calculating initial mandelbrot set.\n");
+    block_count = (data_size / DEFAULT_BLOCK_SIZE) + 1;
+    seconds = CurrentSeconds();
+    BasicMandelbrot<<<block_count, DEFAULT_BLOCK_SIZE>>>(g.device_mandelbrot,
+      g.mandelbrot_iterations, g.dimensions);
+    CheckCUDAError(cudaGetLastError());
+    CheckCUDAError(cudaMemcpy(g.host_mandelbrot, g.device_mandelbrot,
+      data_size, cudaMemcpyDeviceToHost));
+    printf("  Mandelbrot took %f seconds.\n", CurrentSeconds() - seconds);
+
+    printf("  Finding start points for buddhabrot.\n");
+    GatherEscapingPoints();
+
+    printf("  Calculating buddhabrot.\n");
+    block_count = (g.escaping_point_count / DEFAULT_BLOCK_SIZE) + 1;
+    seconds = CurrentSeconds();
+    DrawBuddhabrot<<<block_count, DEFAULT_BLOCK_SIZE>>>(
+      g.device_escaping_points, g.escaping_point_count, g.device_buddhabrot,
+      g.buddhabrot_iterations, g.dimensions);
+    CheckCUDAError(cudaGetLastError());
+    CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
+      data_size * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    printf("  Buddhabrot took %f seconds.\n", CurrentSeconds() - seconds);
+
+    SetColorChannel(g.color_channels[channel]);
+    // Color channels will only differ by a fixed number of iterations for now.
+    mandelbrot_iterations /= 2;
+    buddhabrot_iterations /= 2;
+  }
+}
+
 // Copies data from the host-side data buffer to the texture drawn to the SDL
 // window.
 static void UpdateDisplayedImage(void) {
   int x, y;
   uint8_t *image_pixels;
-  int image_pitch;
-  int to_skip_per_row;
-  uint8_t color_value;
-  double linear_scale = GetLinearColorScale();
-  uint32_t *host_data = g.host_buddhabrot;
+  int image_pitch, to_skip_per_row, pixel_number;
   if (SDL_LockTexture(g.image, NULL, (void **) (&image_pixels), &image_pitch)
     < 0) {
     printf("Error locking SDL texture: %s\n", SDL_GetError());
@@ -364,16 +408,16 @@ static void UpdateDisplayedImage(void) {
   // Abide by the image pitch, and skip unaffected bytes in each row.
   // (image_pitch should usually be equal to g.w * 4 anyway).
   to_skip_per_row = image_pitch - (g.dimensions.w * 4);
+  pixel_number = 0;
   for (y = 0; y < g.dimensions.h; y++) {
     for (x = 0; x < g.dimensions.w; x++) {
-      color_value = DoGammaCorrection(*host_data, linear_scale);
       // The byte order is ABGR
       image_pixels[0] = 0xff;
-      image_pixels[1] = color_value;
-      image_pixels[2] = color_value;
-      image_pixels[3] = color_value;
+      image_pixels[1] = g.color_channels[2][pixel_number];
+      image_pixels[2] = g.color_channels[1][pixel_number];
+      image_pixels[3] = g.color_channels[0][pixel_number];
       image_pixels += 4;
-      host_data++;
+      pixel_number++;
     }
     image_pixels += to_skip_per_row;
   }
@@ -471,7 +515,7 @@ static void SaveImage(void) {
 static void PrintUsage(char *program_name) {
   printf("Usage: %s [options]\n\n", program_name);
   printf("Options may be one or more of the following:\n"
-    "  -h, --help: Prints these instructions.\n"
+    "  --help: Prints these instructions.\n"
     "  -d <CUDA device number>: Can be used to set which GPU to use.\n"
     "     Defaults to the default GPU.\n"
     "  -s <output file name>: If provided, the rendered image will be saved\n"
@@ -506,9 +550,6 @@ static int ParseIntArg(int argc, char **argv, int index) {
 // necessary.
 static void ParseArguments(int argc, char **argv) {
   for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "-h") == 0) {
-      PrintUsage(argv[0]);
-    }
     if (strcmp(argv[i], "--help") == 0) {
       PrintUsage(argv[0]);
     }
@@ -544,10 +585,9 @@ static void ParseArguments(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   memset(&g, 0, sizeof(g));
-  SetResolution(1000, 1000);
-  //SetResolution(3840, 2400);
   g.mandelbrot_iterations = 1000;
   g.buddhabrot_iterations = 1000;
+  SetResolution(1000, 1000);
   g.cuda_device = USE_DEFAULT_DEVICE;
   ParseArguments(argc, argv);
   printf("Calculating image...\n");
