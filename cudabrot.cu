@@ -27,7 +27,7 @@ extern "C" {
 
 // The gamma value to use for gamma correction, or 1.0 if no gamma correction
 // should be applied.
-#define GAMMA_CORRECTION (1.0)
+#define GAMMA_CORRECTION (1.2)
 
 // The number of color channels in the resulting image. Should be 3 for RBG.
 #define COLOR_CHANNELS (3)
@@ -189,6 +189,15 @@ static void SetupCUDA(void) {
   }
 }
 
+// This should be used to update the pixel data for a point that is encountered
+// in the set.
+__device__ void IncrementPixelCounter(int row, int col, uint32_t *data,
+    FractalDimensions *d) {
+  if ((row >= 0) && (row < d->h) && (col >= 0) && (col < d->h)) {
+    data[row * d->w + col]++;
+  }
+}
+
 // This kernel takes a list of points which escape the mandelbrot set, and, for
 // each iteration of the point, increments its location in the data array.
 __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
@@ -219,9 +228,8 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
       current_real = tmp;
       row = (current_imag - dimensions.min_imag) / dimensions.delta_imag;
       col = (current_real - dimensions.min_real) / dimensions.delta_real;
-      if (record_path && (row >= 0) && (row < dimensions.h) && (col >= 0) &&
-        (col < dimensions.w)) {
-        data[row * dimensions.w + col]++;
+      if (record_path) {
+        IncrementPixelCounter(row, col, data, &dimensions);
       }
       // If the point escapes, stop iterating and don't record the next loop.
       if (((current_real * current_real) + (current_imag * current_imag)) >
@@ -232,7 +240,7 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
     }
     // Record the next path if the point didn't escape and we weren't already
     // recording.
-    if (!point_escaped && !record_path) {
+    if (point_escaped && !record_path) {
       record_path = 1;
     } else {
       record_path = 0;
@@ -297,7 +305,7 @@ static void RenderImage(void) {
     printf("Calculating buddhabrot.\n");
     seconds = CurrentSeconds();
     DrawBuddhabrot<<<g.block_count, g.block_size>>>(g.dimensions,
-       g.device_buddhabrot, 100, g.buddhabrot_iterations, g.rng_states);
+       g.device_buddhabrot, 1000, g.buddhabrot_iterations, g.rng_states);
     CheckCUDAError(cudaGetLastError());
     CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
       data_size * sizeof(uint32_t), cudaMemcpyDeviceToHost));
