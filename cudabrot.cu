@@ -1,4 +1,6 @@
 #include <cuda_runtime.h>
+#include <curand.h>
+#include <curand_kernel.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,11 +11,11 @@ extern "C" {
 #include <SDL2/SDL.h>
 }
 
-// The number of CUDA threads to use per block.
-#define DEFAULT_BLOCK_SIZE (256)
+// Controls the number of threads per block to use.
+#define DEFAULT_BLOCK_SIZE (1024)
 
-// The number of iterations to record the paths of points that escape the set.
-#define PATH_ITERATIONS (20000)
+// Controls the default number of blocks to use.
+#define DEFAULT_BLOCK_COUNT (16)
 
 // This macro takes a cudaError_t value and exits the program if it isn't equal
 // to cudaSuccess. (Calls the ErrorCheck function, defined later).
@@ -25,7 +27,7 @@ extern "C" {
 
 // The gamma value to use for gamma correction, or 1.0 if no gamma correction
 // should be applied.
-#define GAMMA_CORRECTION (1.2)
+#define GAMMA_CORRECTION (1.0)
 
 // The number of color channels in the resulting image. Should be 3 for RBG.
 #define COLOR_CHANNELS (3)
@@ -45,13 +47,6 @@ typedef struct {
   double delta_imag;
 } FractalDimensions;
 
-// Tracks a single pair of points which escaped the mandelbrot set. These will
-// be used as the start points of buddhabrot paths.
-typedef struct {
-  double real;
-  double imag;
-} EscapingPoint;
-
 // Holds globals in a single namespace.
 static struct {
   SDL_Window *window;
@@ -60,27 +55,17 @@ static struct {
   // The CUDA device to use. If this is -1, a device won't be set, which should
   // fall back to CUDA's normal device.
   int cuda_device;
+  // This tracks the random number generator states for the GPU code.
+  curandState_t *rng_states;
+  // The number of threads and blocks to use when calculating the buddhabrot.
+  int block_size, block_count;
   // The filename to which a bitmap image will be saved, or NULL if an image
   // should not be saved.
   char *output_image;
-  // The maximum number of iterations to run each point in the initial
-  // mandelbrot calculation.
-  int mandelbrot_iterations;
-  // The number of iterations to track the paths of escaping points in the
-  // buddhabrot.
+  // The number of iterations to check for escaping points in the buddhabrot.
   int buddhabrot_iterations;
   // The size and location of the fractal and output image.
   FractalDimensions dimensions;
-  // Pointer to the device memory that will contain 0 if a point is in the set,
-  // and 1 if it escapes the set.
-  uint8_t *device_mandelbrot;
-  // The host-side copy of the basic binary mandelbrot set.
-  uint8_t *host_mandelbrot;
-  // Lists of points which escape the mandelbrot set.
-  EscapingPoint *host_escaping_points;
-  EscapingPoint *device_escaping_points;
-  // The number of points which escaped the mandelbrot set.
-  int escaping_point_count;
   // The host and device buffers which contain the numbers of times an escaping
   // point's path crossed each point in the complex plane.
   uint32_t *device_buddhabrot;
@@ -97,10 +82,8 @@ static void CleanupGlobals(void) {
   if (g.renderer) SDL_DestroyRenderer(g.renderer);
   if (g.image) SDL_DestroyTexture(g.image);
   if (g.window) SDL_DestroyWindow(g.window);
-  if (g.device_mandelbrot) cudaFree(g.device_mandelbrot);
-  if (g.host_mandelbrot) free(g.host_mandelbrot);
-  if (g.host_escaping_points) free(g.host_escaping_points);
-  if (g.device_escaping_points) cudaFree(g.device_escaping_points);
+  if (g.rng_states) cudaFree(g.rng_states);
+  if (g.device_buddhabrot) cudaFree(g.device_buddhabrot);
   for (i = 0; i < COLOR_CHANNELS; i++) {
     if (g.color_channels[i]) free(g.color_channels[i]);
   }
@@ -124,8 +107,8 @@ static void InternalCUDAErrorCheck(cudaError_t result, const char *fn,
     const char *file, int line) {
   if (result == cudaSuccess) return;
   printf("CUDA error %d in %s, line %d (%s)\n", (int) result, file, line, fn);
-  exit(1);
   CleanupGlobals();
+  exit(1);
 }
 
 // Sets up the SDL window and resources. Must be called after g.w and g.h have
@@ -158,6 +141,14 @@ static void SetupSDL(void) {
   }
 }
 
+// This function is used to initialize the RNG states to use when generating
+// starting points in the buddhabrot calculation. The states array must hold
+// one entry for every thread in every block.
+__global__ void InitializeRNG(uint64_t seed, curandState_t *states) {
+  int index = (blockIdx.x * blockDim.x) + threadIdx.x;
+  curand_init(seed, index, 0, states + index);
+}
+
 // Allocates CUDA memory and calculates block/grid sizes. Must be called after
 // g.w and g.h have been set.
 static void SetupCUDA(void) {
@@ -166,15 +157,8 @@ static void SetupCUDA(void) {
     CheckCUDAError(cudaSetDevice(g.cuda_device));
   }
   size_t buffer_size = g.dimensions.w * g.dimensions.h;
-  CheckCUDAError(cudaMalloc(&(g.device_mandelbrot), buffer_size));
-  CheckCUDAError(cudaMemset(g.device_mandelbrot, 0, buffer_size));
-  g.host_mandelbrot = (uint8_t *) malloc(buffer_size);
-  if (!g.host_mandelbrot) {
-    printf("Failed allocating host mandelbrot buffer.\n");
-    CleanupGlobals();
-    exit(1);
-  }
-  memset(g.host_mandelbrot, 0, buffer_size);
+
+  // Initialize the host and device image buffers.
   CheckCUDAError(cudaMalloc(&(g.device_buddhabrot), buffer_size *
     sizeof(uint32_t)));
   CheckCUDAError(cudaMemset(g.device_buddhabrot, 0, buffer_size *
@@ -187,6 +171,13 @@ static void SetupCUDA(void) {
   }
   memset(g.host_buddhabrot, 0, buffer_size * sizeof(uint32_t));
 
+  // Initialize the RNG state for the device.
+  CheckCUDAError(cudaMalloc(&(g.rng_states), g.block_size * g.block_count *
+    sizeof(curandState_t)));
+  InitializeRNG<<<g.block_size, g.block_count>>>(1337, g.rng_states);
+  CheckCUDAError(cudaDeviceSynchronize());
+
+  // Allocate the color channels for the combined image.
   for (i = 0; i < COLOR_CHANNELS; i++) {
     g.color_channels[i] = (uint8_t *) malloc(buffer_size);
     if (!g.color_channels[i]) {
@@ -198,109 +189,53 @@ static void SetupCUDA(void) {
   }
 }
 
-// A basic mandelbrot set calculator which sets each element in data to 1 if
-// the point escapes within the given number of iterations.
-__global__ void BasicMandelbrot(uint8_t *data, int iterations,
-    FractalDimensions dimensions) {
-  int index = (blockIdx.x * blockDim.x) + threadIdx.x;
-  int row = index / dimensions.w;
-  int col = index % dimensions.w;
-  // This may cause some threads to diverge on the last block only
-  if (row >= dimensions.h) return;
-  double start_real = dimensions.min_real + dimensions.delta_real * col;
-  double start_imag = dimensions.min_imag + dimensions.delta_imag * row;
-  double current_real = start_real;
-  double current_imag = start_imag;
-  double magnitude_squared = (start_real * start_real) + (start_imag *
-    start_imag);
-  uint8_t escaped = 0;
-  double tmp;
-  int i;
-  for (i = 0; i < iterations; i++) {
-    if (magnitude_squared < 4) {
-      tmp = (current_real * current_real) - (current_imag * current_imag) +
-        start_real;
-      current_imag = 2 * current_imag * current_real + start_imag;
-      current_real = tmp;
-      magnitude_squared = (current_real * current_real) + (current_imag *
-        current_imag);
-    } else {
-      escaped = 1;
-    }
-  }
-  data[row * dimensions.w + col] = escaped;
-}
-
-// After BasicMandelbrot has been completed, and host_mandelbrot has been
-// filled in, this will allocate and populate both device_escaping_points and
-// host_escaping_points.
-static void GatherEscapingPoints(void) {
-  int w = g.dimensions.w;
-  int h = g.dimensions.h;
-  int x, y;
-  size_t points_size = 0;
-  int points_added = 0;
-  EscapingPoint *escaping_point = NULL;
-
-  // First, get a count of the escaping points, so the correct amount of memory
-  // can be allocated. We apply oversampling at this step.
-  int count = 0;
-  for (y = 0; y < h; y++) {
-    for (x = 0; x < w; x++) {
-      if (g.host_mandelbrot[y * w + x]) count++;
-    }
-  }
-  g.escaping_point_count = count;
-
-  // Next, build the list of escaping points and copy it to GPU memory.
-  points_size = count * sizeof(EscapingPoint);
-  g.host_escaping_points = (EscapingPoint *) malloc(points_size);
-  if (!g.host_escaping_points) {
-    printf("Failed allocating space for escaping point list.\n");
-    CleanupGlobals();
-    exit(1);
-  }
-  CheckCUDAError(cudaMalloc(&(g.device_escaping_points), points_size));
-  for (y = 0; y < h; y++) {
-    for (x = 0; x < w; x++) {
-      if (!g.host_mandelbrot[y * w + x]) continue;
-      escaping_point = g.host_escaping_points + points_added;
-      escaping_point->real = ((double) x) * g.dimensions.delta_real +
-        g.dimensions.min_real;
-      escaping_point->imag = ((double) y) * g.dimensions.delta_imag +
-        g.dimensions.min_imag;
-      points_added++;
-    }
-  }
-  CheckCUDAError(cudaMemcpy(g.device_escaping_points, g.host_escaping_points,
-    points_size, cudaMemcpyHostToDevice));
-}
-
 // This kernel takes a list of points which escape the mandelbrot set, and, for
 // each iteration of the point, increments its location in the data array.
-__global__ void DrawBuddhabrot(EscapingPoint *points, int point_count,
-    uint32_t *data, int iterations, FractalDimensions dimensions) {
+__global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
+    int iterations, int mandelbrot_iterations, curandState_t *states) {
   int index = (blockIdx.x * blockDim.x) + threadIdx.x;
-  if (index >= point_count) return;
-  int i;
-  double start_real = points[index].real;
-  double start_imag = points[index].imag;
-  double current_real = start_real;
-  double current_imag = start_imag;
-  double tmp;
-  int row, col;
-  // This should only happen in the final block.
-  if (index > point_count) return;
+  curandState_t *rng = states + index;
+  int i, j, point_escaped, record_path, row, col;
+  float start_real, start_imag, current_real, current_imag, tmp;
+  float real_range = dimensions.max_real - dimensions.min_real;
+  float imag_range = dimensions.max_imag - dimensions.min_imag;
+  record_path = 0;
+  point_escaped = 1;
   for (i = 0; i < iterations; i++) {
-    tmp = (current_real * current_real) - (current_imag * current_imag) +
-      start_real;
-    current_imag = 2 * current_real * current_imag + start_imag;
-    current_real = tmp;
-    row = (current_imag - dimensions.min_imag) / dimensions.delta_imag;
-    col = (current_real - dimensions.min_real) / dimensions.delta_real;
-    if ((row >= 0) && (row < dimensions.h) && (col >= 0) && (col <
-      dimensions.w)) {
-      data[row * dimensions.w + col]++;
+    // Calculate a new starting point only if the previous point didn't escape.
+    // Otherwise, we'll use the same starting point, and record the point's
+    // path.
+    if (!record_path) {
+      start_real = curand_uniform(rng) * real_range + dimensions.min_real;
+      start_imag = curand_uniform(rng) * imag_range + dimensions.min_imag;
+    }
+    point_escaped = 0;
+    current_real = start_real;
+    current_imag = start_imag;
+    for (j = 0; j < mandelbrot_iterations; j++) {
+      tmp = (current_real * current_real) - (current_imag * current_imag) +
+        start_real;
+      current_imag = 2 * current_real * current_imag + start_imag;
+      current_real = tmp;
+      row = (current_imag - dimensions.min_imag) / dimensions.delta_imag;
+      col = (current_real - dimensions.min_real) / dimensions.delta_real;
+      if (record_path && (row >= 0) && (row < dimensions.h) && (col >= 0) &&
+        (col < dimensions.w)) {
+        data[row * dimensions.w + col]++;
+      }
+      // If the point escapes, stop iterating and don't record the next loop.
+      if (((current_real * current_real) + (current_imag * current_imag)) >
+        4) {
+        point_escaped = 1;
+        break;
+      }
+    }
+    // Record the next path if the point didn't escape and we weren't already
+    // recording.
+    if (!point_escaped && !record_path) {
+      record_path = 1;
+    } else {
+      record_path = 0;
     }
   }
 }
@@ -352,35 +287,17 @@ static void SetColorChannel(uint8_t *color) {
 
 // Renders the fractal image.
 static void RenderImage(void) {
-  int block_count, channel;
+  int channel;
   size_t data_size = g.dimensions.w * g.dimensions.h;
   double seconds;
-  int mandelbrot_iterations = g.mandelbrot_iterations;
   int buddhabrot_iterations = g.buddhabrot_iterations;
 
   for (channel = 0; channel < COLOR_CHANNELS; channel++) {
     printf("Calculating color channel %d.\n", channel);
-
-    // First, draw the basic mandelbrot to get which points escape.
-    printf("  Calculating initial mandelbrot set.\n");
-    block_count = (data_size / DEFAULT_BLOCK_SIZE) + 1;
+    printf("Calculating buddhabrot.\n");
     seconds = CurrentSeconds();
-    BasicMandelbrot<<<block_count, DEFAULT_BLOCK_SIZE>>>(g.device_mandelbrot,
-      g.mandelbrot_iterations, g.dimensions);
-    CheckCUDAError(cudaGetLastError());
-    CheckCUDAError(cudaMemcpy(g.host_mandelbrot, g.device_mandelbrot,
-      data_size, cudaMemcpyDeviceToHost));
-    printf("  Mandelbrot took %f seconds.\n", CurrentSeconds() - seconds);
-
-    printf("  Finding start points for buddhabrot.\n");
-    GatherEscapingPoints();
-
-    printf("  Calculating buddhabrot.\n");
-    block_count = (g.escaping_point_count / DEFAULT_BLOCK_SIZE) + 1;
-    seconds = CurrentSeconds();
-    DrawBuddhabrot<<<block_count, DEFAULT_BLOCK_SIZE>>>(
-      g.device_escaping_points, g.escaping_point_count, g.device_buddhabrot,
-      g.buddhabrot_iterations, g.dimensions);
+    DrawBuddhabrot<<<g.block_count, g.block_size>>>(g.dimensions,
+       g.device_buddhabrot, 100, g.buddhabrot_iterations, g.rng_states);
     CheckCUDAError(cudaGetLastError());
     CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
       data_size * sizeof(uint32_t), cudaMemcpyDeviceToHost));
@@ -388,8 +305,7 @@ static void RenderImage(void) {
 
     SetColorChannel(g.color_channels[channel]);
     // Color channels will only differ by a fixed number of iterations for now.
-    mandelbrot_iterations /= 2;
-    buddhabrot_iterations /= 2;
+    buddhabrot_iterations /= 10;
   }
 }
 
@@ -521,8 +437,6 @@ static void PrintUsage(char *program_name) {
     "  -s <output file name>: If provided, the rendered image will be saved\n"
     "     to a bitmap file with the given name, in addition to being\n"
     "     displayed in a window.\n"
-    "  -i <mandelbrot iterations>: The number of iterations to use for the\n"
-    "     mandelbrot set. Defaults to 1000.\n"
     "  -b <buddhabrot iterations>: The number of iterations to use for the\n"
     "     buddhabrot calculation. Defaults to 1000.\n");
   exit(0);
@@ -567,11 +481,6 @@ static void ParseArguments(int argc, char **argv) {
       g.output_image = argv[i];
       continue;
     }
-    if (strcmp(argv[i], "-i") == 0) {
-      g.mandelbrot_iterations = ParseIntArg(argc, argv, i);
-      i++;
-      continue;
-    }
     if (strcmp(argv[i], "-b") == 0) {
       g.buddhabrot_iterations = ParseIntArg(argc, argv, i);
       i++;
@@ -585,9 +494,10 @@ static void ParseArguments(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   memset(&g, 0, sizeof(g));
-  g.mandelbrot_iterations = 1000;
   g.buddhabrot_iterations = 1000;
-  SetResolution(1000, 1000);
+  g.block_size = DEFAULT_BLOCK_SIZE;
+  g.block_count = DEFAULT_BLOCK_COUNT;
+  SetResolution(4000, 4000);
   g.cuda_device = USE_DEFAULT_DEVICE;
   ParseArguments(argc, argv);
   printf("Calculating image...\n");
