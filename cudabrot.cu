@@ -64,8 +64,8 @@ static struct {
   // The filename to which a bitmap image will be saved, or NULL if an image
   // should not be saved.
   char *output_image;
-  // The number of iterations to check for escaping points in the buddhabrot.
-  int buddhabrot_iterations;
+  // Holds various iteration-related settings.
+  IterationControl iterations;
   // The size and location of the fractal and output image.
   FractalDimensions dimensions;
   // The host and device buffers which contain the numbers of times an escaping
@@ -264,14 +264,10 @@ static void SetGrayscalePixels(void) {
 static void RenderImage(void) {
   size_t data_size = g.dimensions.w * g.dimensions.h;
   double seconds;
-  IterationControl iterations;
-  iterations.min_escape_iterations = 20;
-  iterations.samples_per_thread = 2000;
-  iterations.max_escape_iterations = g.buddhabrot_iterations;
   printf("Calculating buddhabrot.\n");
   seconds = CurrentSeconds();
   DrawBuddhabrot<<<g.block_count, g.block_size>>>(g.dimensions,
-    g.device_buddhabrot, iterations, g.rng_states);
+    g.device_buddhabrot, g.iterations, g.rng_states);
   CheckCUDAError(cudaGetLastError());
   CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
     data_size * sizeof(uint32_t), cudaMemcpyDeviceToHost));
@@ -327,11 +323,11 @@ static void PrintUsage(char *program_name) {
     "  --help: Prints these instructions.\n"
     "  -d <CUDA device number>: Can be used to set which GPU to use.\n"
     "     Defaults to the default GPU.\n"
-    "  -s <output file name>: If provided, the rendered image will be saved\n"
+    "  -o <output file name>: If provided, the rendered image will be saved\n"
     "     to a bitmap file with the given name, in addition to being\n"
     "     displayed in a window.\n"
-    "  -b <buddhabrot iterations>: The number of iterations to use for the\n"
-    "     buddhabrot calculation. Defaults to 1000.\n");
+    "  -m <max escape iterations>: The maximum number of iterations to use\n"
+    "     before giving up on seeing whether a point escapes.\n");
   exit(0);
 }
 
@@ -365,7 +361,7 @@ static void ParseArguments(int argc, char **argv) {
       i++;
       continue;
     }
-    if (strcmp(argv[i], "-s") == 0) {
+    if (strcmp(argv[i], "-o") == 0) {
       if ((i + 1) >= argc) {
         printf("Missing output file name.\n");
         PrintUsage(argv[0]);
@@ -374,8 +370,8 @@ static void ParseArguments(int argc, char **argv) {
       g.output_image = argv[i];
       continue;
     }
-    if (strcmp(argv[i], "-b") == 0) {
-      g.buddhabrot_iterations = ParseIntArg(argc, argv, i);
+    if (strcmp(argv[i], "-m") == 0) {
+      g.iterations.max_escape_iterations = ParseIntArg(argc, argv, i);
       i++;
       continue;
     }
@@ -387,7 +383,9 @@ static void ParseArguments(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   memset(&g, 0, sizeof(g));
-  g.buddhabrot_iterations = 100;
+  g.iterations.max_escape_iterations = 100;
+  g.iterations.min_escape_iterations = 20;
+  g.iterations.samples_per_thread = 2000;
   g.block_size = DEFAULT_BLOCK_SIZE;
   g.block_count = DEFAULT_BLOCK_COUNT;
   SetResolution(4000, 4000);
