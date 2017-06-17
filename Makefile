@@ -9,11 +9,8 @@ NVCCFLAGS := -g --ptxas-options=-v --compiler-options="$(CFLAGS)" \
 
 all: cudabrot
 
-bitmap_file.o: bitmap_file.c bitmap_file.h
-	gcc $(CFLAGS) -c -o bitmap_file.o bitmap_file.c
-
-cudabrot: cudabrot.cu bitmap_file.o
-	nvcc $(NVCCFLAGS) -o cudabrot cudabrot.cu bitmap_file.o -lm
+cudabrot: cudabrot.cu
+	nvcc $(NVCCFLAGS) -o cudabrot cudabrot.cu -lm
 
 clean:
 	rm -f cudabrot

@@ -7,7 +7,6 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include "bitmap_file.h"
 
 // Controls the number of threads per block to use.
 #define DEFAULT_BLOCK_SIZE (1024)
@@ -26,9 +25,6 @@
 // The gamma value to use for gamma correction, or 1.0 if no gamma correction
 // should be applied.
 #define GAMMA_CORRECTION (1.0)
-
-// The number of color channels in the resulting image. Should be 3 for RBG.
-#define COLOR_CHANNELS (3)
 
 // Holds the boundaries and sizes of the fractal, in both pixels and numbers
 typedef struct {
@@ -68,28 +64,25 @@ static struct {
   // The filename to which a bitmap image will be saved, or NULL if an image
   // should not be saved.
   char *output_image;
-  // The number of iterations to check for escaping points in the buddhabrot.
-  int buddhabrot_iterations;
+  // Information about the number of iterations to use.
+  IterationControl iterations;
   // The size and location of the fractal and output image.
   FractalDimensions dimensions;
   // The host and device buffers which contain the numbers of times an escaping
   // point's path crossed each point in the complex plane.
-  uint32_t *device_buddhabrot;
-  uint32_t *host_buddhabrot;
-  // Buffers for the three different color channels, which will be calculated
-  // separately and combined into the final image.
-  uint8_t *color_channels[COLOR_CHANNELS];
+  uint64_t *device_buddhabrot;
+  uint64_t *host_buddhabrot;
+  // This buffer will hold the 16-bit grayscale image when converted from the
+  // 64-bit counters.
+  uint16_t *grayscale_image;
 } g;
 
 // If any globals have been initialized, this will free them. (Relies on
 // globals being set to 0 at the start of the program)
 static void CleanupGlobals(void) {
-  int i;
   if (g.rng_states) cudaFree(g.rng_states);
   if (g.device_buddhabrot) cudaFree(g.device_buddhabrot);
-  for (i = 0; i < COLOR_CHANNELS; i++) {
-    if (g.color_channels[i]) free(g.color_channels[i]);
-  }
+  if (g.grayscale_image) free(g.grayscale_image);
   memset(&g, 0, sizeof(g));
 }
 
@@ -125,7 +118,6 @@ __global__ void InitializeRNG(uint64_t seed, curandState_t *states) {
 // Allocates CUDA memory and calculates block/grid sizes. Must be called after
 // g.w and g.h have been set.
 static void SetupCUDA(void) {
-  int i;
   if (g.cuda_device != USE_DEFAULT_DEVICE) {
     CheckCUDAError(cudaSetDevice(g.cuda_device));
   }
@@ -133,16 +125,16 @@ static void SetupCUDA(void) {
 
   // Initialize the host and device image buffers.
   CheckCUDAError(cudaMalloc(&(g.device_buddhabrot), buffer_size *
-    sizeof(uint32_t)));
+    sizeof(uint64_t)));
   CheckCUDAError(cudaMemset(g.device_buddhabrot, 0, buffer_size *
-    sizeof(uint32_t)));
-  g.host_buddhabrot = (uint32_t *) malloc(buffer_size * sizeof(uint32_t));
+    sizeof(uint64_t)));
+  g.host_buddhabrot = (uint64_t *) malloc(buffer_size * sizeof(uint64_t));
   if (!g.host_buddhabrot) {
     printf("Failed allocating host buddhabrot buffer.\n");
     CleanupGlobals();
     exit(1);
   }
-  memset(g.host_buddhabrot, 0, buffer_size * sizeof(uint32_t));
+  memset(g.host_buddhabrot, 0, buffer_size * sizeof(uint64_t));
 
   // Initialize the RNG state for the device.
   CheckCUDAError(cudaMalloc(&(g.rng_states), g.block_size * g.block_count *
@@ -150,40 +142,38 @@ static void SetupCUDA(void) {
   InitializeRNG<<<g.block_size, g.block_count>>>(1337, g.rng_states);
   CheckCUDAError(cudaDeviceSynchronize());
 
-  // Allocate the color channels for the combined image.
-  for (i = 0; i < COLOR_CHANNELS; i++) {
-    g.color_channels[i] = (uint8_t *) malloc(buffer_size);
-    if (!g.color_channels[i]) {
-      printf("Failed allocating color channel %d buffer.\n", i);
-      CleanupGlobals();
-      exit(1);
-    }
-    memset(g.color_channels[i], 0, buffer_size);
+  // Allocate the buffer for the grayscale bitmap.
+  g.grayscale_image = (uint16_t *) malloc(buffer_size * sizeof(uint16_t));
+  if (!g.grayscale_image) {
+    printf("Failed allocating grayscale image buffer.\n");
+    CleanupGlobals();
+    exit(1);
   }
+  memset(g.grayscale_image, 0, buffer_size * sizeof(uint16_t));
 }
 
 // This should be used to update the pixel data for a point that is encountered
 // in the set.
-__device__ void IncrementPixelCounter(int row, int col, uint32_t *data,
+__device__ void IncrementPixelCounter(int row, int col, uint64_t *data,
     FractalDimensions *d) {
   int r, c;
   r = row;
   c = col;
   if ((r >= 0) && (r < d->h) && (c >= 0) && (c < d->h)) {
-    data[r * d->w + c] += 4;
+    data[r * d->w + c] += 1;
   }
 }
 
 // This kernel takes a list of points which escape the mandelbrot set, and, for
 // each iteration of the point, increments its location in the data array.
-__global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
+__global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
     IterationControl iterations, curandState_t *states) {
   int index = (blockIdx.x * blockDim.x) + threadIdx.x;
   curandState_t *rng = states + index;
   int i, j, point_escaped, record_path, row, col;
-  float start_real, start_imag, current_real, current_imag, tmp;
-  float real_range = dimensions.max_real - dimensions.min_real;
-  float imag_range = dimensions.max_imag - dimensions.min_imag;
+  double start_real, start_imag, current_real, current_imag, tmp;
+  double real_range = dimensions.max_real - dimensions.min_real;
+  double imag_range = dimensions.max_imag - dimensions.min_imag;
   record_path = 0;
   point_escaped = 1;
   for (i = 0; i < iterations.samples_per_thread; i++) {
@@ -191,8 +181,10 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
     // Otherwise, we'll use the same starting point, and record the point's
     // path.
     if (!record_path) {
-      start_real = curand_uniform(rng) * real_range + dimensions.min_real;
-      start_imag = curand_uniform(rng) * imag_range + dimensions.min_imag;
+      start_real = curand_uniform_double(rng) * real_range +
+        dimensions.min_real;
+      start_imag = curand_uniform_double(rng) * imag_range +
+        dimensions.min_imag;
     }
     point_escaped = 0;
     current_real = start_real;
@@ -226,10 +218,10 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
   }
 }
 
-static uint8_t Clamp(double v) {
+static uint16_t Clamp(double v) {
   if (v <= 0) return 0;
-  if (v >= 255) return 255;
-  return (uint8_t) v;
+  if (v >= 0xffff) return 0xffff;
+  return (uint16_t) v;
 }
 
 // Returns the amount to multiply the original count by in order to get a value
@@ -237,35 +229,37 @@ static uint8_t Clamp(double v) {
 // 255.
 static double GetLinearColorScale(void) {
   int x, y, index;
-  uint32_t max = 0;
+  uint64_t max = 0;
   index = 0;
   for (y = 0; y < g.dimensions.h; y++) {
     for (x = 0; x < g.dimensions.w; x++) {
       if (g.host_buddhabrot[index] > max) max = g.host_buddhabrot[index];
     }
   }
-  return 255.0 / ((double) max);
+  return ((double) 0xffff) / ((double) max);
 }
 
 // Returns the gamma-corrected 8-bit color channel value given a buddhabrot
 // iteration count c.
-static uint8_t DoGammaCorrection(uint32_t c, double linear_scale) {
+static uint16_t DoGammaCorrection(uint64_t c, double linear_scale) {
+  double max = 0xffff;
   double scaled = ((double) c) * linear_scale;
-  scaled = 255 * log(c + 1) / log(255);
-  return Clamp(255 * pow(scaled / 255, 1 / GAMMA_CORRECTION));
+  scaled = max * log(c + 1) / log(max);
+  return Clamp(max * pow(scaled / max, 1.0 / GAMMA_CORRECTION));
 }
 
-// Fills in a single color channel from the current host_buddhabrot buffer.
-static void SetColorChannel(uint8_t *color) {
+// Fills in the grayscale color image from the current host buddhabrot buffer.
+static void ConvertToGrayscale(void) {
   int x, y;
-  uint8_t color_value;
+  uint16_t color_value;
   double linear_scale = GetLinearColorScale();
-  uint32_t *host_data = g.host_buddhabrot;
+  uint64_t *host_data = g.host_buddhabrot;
+  uint16_t *output_image = g.grayscale_image;
   for (y = 0; y < g.dimensions.h; y++) {
     for (x = 0; x < g.dimensions.w; x++) {
       color_value = DoGammaCorrection(*host_data, linear_scale);
-      *color = color_value;
-      color++;
+      *output_image = color_value;
+      output_image++;
       host_data++;
     }
   }
@@ -273,30 +267,19 @@ static void SetColorChannel(uint8_t *color) {
 
 // Renders the fractal image.
 static void RenderImage(void) {
-  int channel;
   size_t data_size = g.dimensions.w * g.dimensions.h;
   double seconds;
-  IterationControl iterations;
-  iterations.min_escape_iterations = 20;
-  iterations.samples_per_thread = 2000;
-  iterations.max_escape_iterations = g.buddhabrot_iterations;
 
-  for (channel = 0; channel < COLOR_CHANNELS; channel++) {
-    printf("Calculating color channel %d.\n", channel);
-    printf("Calculating buddhabrot.\n");
-    seconds = CurrentSeconds();
-    DrawBuddhabrot<<<g.block_count, g.block_size>>>(g.dimensions,
-       g.device_buddhabrot, iterations, g.rng_states);
-    CheckCUDAError(cudaGetLastError());
-    CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
-      data_size * sizeof(uint32_t), cudaMemcpyDeviceToHost));
-    printf("  Buddhabrot took %f seconds.\n", CurrentSeconds() - seconds);
+  printf("Calculating buddhabrot.\n");
+  seconds = CurrentSeconds();
+  DrawBuddhabrot<<<g.block_count, g.block_size>>>(g.dimensions,
+     g.device_buddhabrot, g.iterations, g.rng_states);
+  CheckCUDAError(cudaGetLastError());
+  CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
+    data_size * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+  printf("Buddhabrot took %f seconds.\n", CurrentSeconds() - seconds);
 
-    SetColorChannel(g.color_channels[channel]);
-    // Color channels will only differ by a fixed number of iterations for now.
-    iterations.max_escape_iterations /= 2;
-    iterations.min_escape_iterations /= 2;
-  }
+  ConvertToGrayscale();
 }
 
 // Sets the resolution, scaling the complex boundaries to maintain an aspect
@@ -319,31 +302,34 @@ static void SetResolution(int width, int height) {
 
 // If a filename has been set for saving the image, this will attempt to save
 // the image to the file.
+// If a filename has been set for an output image, this will attempt to save
+// the file. The image will be in 16-bit PGM format.
 static void SaveImage(void) {
-  uint8_t *pixel_data = NULL;
-  uint32_t pixel_count = g.dimensions.w * g.dimensions.h;
-  uint32_t i, base_offset;
-  // Allocate 3 bytes per pixel.
-  pixel_data = (uint8_t *) malloc(pixel_count * 3);
-  if (!pixel_data) {
-    printf("Failed allocating bitmap pixel data.\n");
-    return ;
+  FILE *output = NULL;
+  size_t buffer_size = g.dimensions.w * g.dimensions.h * sizeof(uint16_t);
+  output = fopen(g.output_image, "wb");
+  if (!output) {
+    printf("Failed opening output file (%s).\n", g.output_image);
+    CleanupGlobals();
+    exit(1);
   }
-  for (i = 0; i < pixel_count; i++) {
-    base_offset = i * 3;
-    pixel_data[base_offset] = g.color_channels[2][i];
-    pixel_data[base_offset + 1] = g.color_channels[1][i];
-    pixel_data[base_offset + 2] = g.color_channels[0][i];
+  if (fprintf(output, "P5\n%d %d\n%d\n", g.dimensions.w, g.dimensions.h,
+    0xffff) <= 0) {
+    printf("Failed writing PGM file header.\n");
+    fclose(output);
+    CleanupGlobals();
+    exit(1);
   }
-  if (!SaveBitmapFile(g.output_image, pixel_data, g.dimensions.w,
-    g.dimensions.h)) {
-    printf("Failed saving output file.\n");
-    free(pixel_data);
-    return;
+  if (!fwrite(g.grayscale_image, buffer_size, 1, output)) {
+    printf("Failed writing PGM pixel data.\n");
+    fclose(output);
+    CleanupGlobals();
+    exit(1);
   }
+  fclose(output);
   printf("Saved output image OK.\n");
-  free(pixel_data);
 }
+// TODO (next): Test pgm output
 
 static void PrintUsage(char *program_name) {
   printf("Usage: %s [options]\n\n", program_name);
@@ -351,11 +337,16 @@ static void PrintUsage(char *program_name) {
     "  --help: Prints these instructions.\n"
     "  -d <CUDA device number>: Can be used to set which GPU to use.\n"
     "     Defaults to the default GPU.\n"
-    "  -s <output file name>: If provided, the rendered image will be saved\n"
+    "  -o <output file name>: If provided, the rendered image will be saved\n"
     "     to a bitmap file with the given name, in addition to being\n"
     "     displayed in a window.\n"
-    "  -b <buddhabrot iterations>: The number of iterations to use for the\n"
-    "     buddhabrot calculation. Defaults to 1000.\n");
+    "  -m <max escape iterations>: The number of iterations to wait before\n"
+    "     seeing if a point has escaped.\n"
+    "  -c <min escape iterations>: If a point escpaes before iterating this\n"
+    "     many times, it won't be included in the buddhabrot.\n"
+    "  -r <resolution>: The number of pixels across the (square) output.\n"
+    "  -s <samples per thread>: The number of samples performed by each CUDA"
+    "     thread.\n");
   exit(0);
 }
 
@@ -380,6 +371,7 @@ static int ParseIntArg(int argc, char **argv, int index) {
 // Processes command-line arguments, setting values in the globals struct as
 // necessary.
 static void ParseArguments(int argc, char **argv) {
+  int resolution;
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--help") == 0) {
       PrintUsage(argv[0]);
@@ -389,7 +381,7 @@ static void ParseArguments(int argc, char **argv) {
       i++;
       continue;
     }
-    if (strcmp(argv[i], "-s") == 0) {
+    if (strcmp(argv[i], "-o") == 0) {
       if ((i + 1) >= argc) {
         printf("Missing output file name.\n");
         PrintUsage(argv[0]);
@@ -398,23 +390,45 @@ static void ParseArguments(int argc, char **argv) {
       g.output_image = argv[i];
       continue;
     }
-    if (strcmp(argv[i], "-b") == 0) {
-      g.buddhabrot_iterations = ParseIntArg(argc, argv, i);
+    if (strcmp(argv[i], "-m") == 0) {
+      g.iterations.max_escape_iterations = ParseIntArg(argc, argv, i);
       i++;
+      continue;
+    }
+    if (strcmp(argv[i], "-c") == 0) {
+      g.iterations.min_escape_iterations = ParseIntArg(argc, argv, i);
+      i++;
+      continue;
+    }
+    if (strcmp(argv[i], "-s") == 0) {
+      g.iterations.samples_per_thread = ParseIntArg(argc, argv, i);
+      i++;
+      continue;
+    }
+    if (strcmp(argv[i], "-r") == 0) {
+      resolution = ParseIntArg(argc, argv, i);
+      i++;
+      SetResolution(resolution, resolution);
       continue;
     }
     // Unrecognized argument, print the usage string.
     printf("Invalid argument: %s\n", argv[i]);
     PrintUsage(argv[0]);
   }
+  if (!g.output_image) {
+    printf("An output file name is required.\n");
+    PrintUsage(argv[0]);
+  }
 }
 
 int main(int argc, char **argv) {
   memset(&g, 0, sizeof(g));
-  g.buddhabrot_iterations = 100;
+  g.iterations.samples_per_thread = 1000;
+  g.iterations.max_escape_iterations = 100;
+  g.iterations.min_escape_iterations = 20;
   g.block_size = DEFAULT_BLOCK_SIZE;
   g.block_count = DEFAULT_BLOCK_COUNT;
-  SetResolution(4000, 4000);
+  SetResolution(1000, 1000);
   g.cuda_device = USE_DEFAULT_DEVICE;
   ParseArguments(argc, argv);
   printf("Calculating image...\n");
