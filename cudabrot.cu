@@ -169,9 +169,9 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
   int index = (blockIdx.x * blockDim.x) + threadIdx.x;
   curandState_t *rng = states + index;
   int i, j, point_escaped, record_path, row, col;
-  float start_real, start_imag, current_real, current_imag, tmp;
-  float real_range = dimensions.max_real - dimensions.min_real;
-  float imag_range = dimensions.max_imag - dimensions.min_imag;
+  double start_real, start_imag, current_real, current_imag, tmp;
+  double real_range = dimensions.max_real - dimensions.min_real;
+  double imag_range = dimensions.max_imag - dimensions.min_imag;
   record_path = 0;
   point_escaped = 1;
   for (i = 0; i < iterations.samples_per_thread; i++) {
@@ -179,8 +179,10 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
     // Otherwise, we'll use the same starting point, and record the point's
     // path.
     if (!record_path) {
-      start_real = curand_uniform(rng) * real_range + dimensions.min_real;
-      start_imag = curand_uniform(rng) * imag_range + dimensions.min_imag;
+      start_real = curand_uniform_double(rng) * real_range +
+        dimensions.min_real;
+      start_imag = curand_uniform_double(rng) * imag_range +
+        dimensions.min_imag;
     }
     point_escaped = 0;
     current_real = start_real;
@@ -230,6 +232,7 @@ static double GetLinearColorScale(void) {
   for (y = 0; y < g.dimensions.h; y++) {
     for (x = 0; x < g.dimensions.w; x++) {
       if (g.host_buddhabrot[index] > max) max = g.host_buddhabrot[index];
+      index++;
     }
   }
   return 255.0 / ((double) max);
