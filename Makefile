@@ -13,8 +13,7 @@ bitmap_file.o: bitmap_file.c bitmap_file.h
 	gcc $(CFLAGS) -c -o bitmap_file.o bitmap_file.c
 
 cudabrot: cudabrot.cu bitmap_file.o
-	nvcc $(NVCCFLAGS) $(shell sdl2-config --cflags) \
-		$(shell sdl2-config --libs) -o cudabrot cudabrot.cu bitmap_file.o -lm
+	nvcc $(NVCCFLAGS) -o cudabrot cudabrot.cu bitmap_file.o -lm
 
 clean:
 	rm -f cudabrot

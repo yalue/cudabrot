@@ -7,9 +7,6 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-extern "C" {
-#include <SDL2/SDL.h>
-}
 #include "bitmap_file.h"
 
 // Controls the number of threads per block to use.
@@ -61,9 +58,6 @@ typedef struct {
 
 // Holds globals in a single namespace.
 static struct {
-  SDL_Window *window;
-  SDL_Renderer *renderer;
-  SDL_Texture *image;
   // The CUDA device to use. If this is -1, a device won't be set, which should
   // fall back to CUDA's normal device.
   int cuda_device;
@@ -91,9 +85,6 @@ static struct {
 // globals being set to 0 at the start of the program)
 static void CleanupGlobals(void) {
   int i;
-  if (g.renderer) SDL_DestroyRenderer(g.renderer);
-  if (g.image) SDL_DestroyTexture(g.image);
-  if (g.window) SDL_DestroyWindow(g.window);
   if (g.rng_states) cudaFree(g.rng_states);
   if (g.device_buddhabrot) cudaFree(g.device_buddhabrot);
   for (i = 0; i < COLOR_CHANNELS; i++) {
@@ -121,36 +112,6 @@ static void InternalCUDAErrorCheck(cudaError_t result, const char *fn,
   printf("CUDA error %d in %s, line %d (%s)\n", (int) result, file, line, fn);
   CleanupGlobals();
   exit(1);
-}
-
-// Sets up the SDL window and resources. Must be called after g.w and g.h have
-// been set.
-static void SetupSDL(void) {
-  if (SDL_Init(SDL_INIT_EVERYTHING) < 0) {
-    printf("SDL error %s\n", SDL_GetError());
-    CleanupGlobals();
-    exit(1);
-  }
-  g.window = SDL_CreateWindow("Rendered image", SDL_WINDOWPOS_UNDEFINED,
-    SDL_WINDOWPOS_UNDEFINED, g.dimensions.w, g.dimensions.h, SDL_WINDOW_SHOWN |
-    SDL_WINDOW_RESIZABLE);
-  if (!g.window) {
-    printf("Error creating SDL window: %s\n", SDL_GetError());
-    CleanupGlobals();
-    exit(1);
-  }
-  g.renderer = SDL_CreateRenderer(g.window, -1, SDL_RENDERER_ACCELERATED);
-  if (!g.renderer) {
-    printf("Error creating SDL renderer: %s\n", SDL_GetError());
-    CleanupGlobals();
-    exit(1);
-  }
-  g.image = SDL_CreateTexture(g.renderer, SDL_PIXELFORMAT_RGBA8888,
-    SDL_TEXTUREACCESS_STREAMING, g.dimensions.w, g.dimensions.h);
-  if (!g.image) {
-    printf("Failed creating SDL texture: %s\n", SDL_GetError());
-    exit(1);
-  }
 }
 
 // This function is used to initialize the RNG states to use when generating
@@ -338,62 +299,6 @@ static void RenderImage(void) {
   }
 }
 
-// Copies data from the host-side data buffer to the texture drawn to the SDL
-// window.
-static void UpdateDisplayedImage(void) {
-  int x, y;
-  uint8_t *image_pixels;
-  int image_pitch, to_skip_per_row, pixel_number;
-  if (SDL_LockTexture(g.image, NULL, (void **) (&image_pixels), &image_pitch)
-    < 0) {
-    printf("Error locking SDL texture: %s\n", SDL_GetError());
-    CleanupGlobals();
-    exit(1);
-  }
-  // Abide by the image pitch, and skip unaffected bytes in each row.
-  // (image_pitch should usually be equal to g.w * 4 anyway).
-  to_skip_per_row = image_pitch - (g.dimensions.w * 4);
-  pixel_number = 0;
-  for (y = 0; y < g.dimensions.h; y++) {
-    for (x = 0; x < g.dimensions.w; x++) {
-      // The byte order is ABGR
-      image_pixels[0] = 0xff;
-      image_pixels[1] = g.color_channels[2][pixel_number];
-      image_pixels[2] = g.color_channels[1][pixel_number];
-      image_pixels[3] = g.color_channels[0][pixel_number];
-      image_pixels += 4;
-      pixel_number++;
-    }
-    image_pixels += to_skip_per_row;
-  }
-  SDL_UnlockTexture(g.image);
-}
-
-// Runs the main loop to display the SDL window. This will return when SDL
-// detects an exit event.
-static void SDLWindowLoop(void) {
-  SDL_Event event;
-  int quit = 0;
-  // Update the display once every 30 ms (not really necessary for now, while
-  // it doesn't change...
-  while (!quit) {
-    while (SDL_PollEvent(&event)) {
-      if (event.type == SDL_QUIT) {
-        quit = 1;
-        break;
-      }
-    }
-    UpdateDisplayedImage();
-    if (SDL_RenderCopy(g.renderer, g.image, NULL, NULL) < 0) {
-      printf("Error rendering image: %s\n", SDL_GetError());
-      CleanupGlobals();
-      exit(1);
-    }
-    SDL_RenderPresent(g.renderer);
-    usleep(20000);
-  }
-}
-
 // Sets the resolution, scaling the complex boundaries to maintain an aspect
 // ratio.
 static void SetResolution(int width, int height) {
@@ -515,9 +420,7 @@ int main(int argc, char **argv) {
   printf("Calculating image...\n");
   SetupCUDA();
   RenderImage();
-  printf("Done!\n");
-  SetupSDL();
-  SDLWindowLoop();
+  printf("Done! Saving image.\n");
   SaveImage();
   CleanupGlobals();
   return 0;
