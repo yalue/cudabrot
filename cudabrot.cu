@@ -10,6 +10,7 @@
 extern "C" {
 #include <SDL2/SDL.h>
 }
+#include "bitmap_file.h"
 
 // Controls the number of threads per block to use.
 #define DEFAULT_BLOCK_SIZE (1024)
@@ -27,7 +28,7 @@ extern "C" {
 
 // The gamma value to use for gamma correction, or 1.0 if no gamma correction
 // should be applied.
-#define GAMMA_CORRECTION (1.1)
+#define GAMMA_CORRECTION (1.0)
 
 // The number of color channels in the resulting image. Should be 3 for RBG.
 #define COLOR_CHANNELS (3)
@@ -316,7 +317,7 @@ static void RenderImage(void) {
   double seconds;
   IterationControl iterations;
   iterations.min_escape_iterations = 20;
-  iterations.samples_per_thread = 100;
+  iterations.samples_per_thread = 2000;
   iterations.max_escape_iterations = g.buddhabrot_iterations;
 
   for (channel = 0; channel < COLOR_CHANNELS; channel++) {
@@ -332,7 +333,7 @@ static void RenderImage(void) {
 
     SetColorChannel(g.color_channels[channel]);
     // Color channels will only differ by a fixed number of iterations for now.
-    iterations.max_escape_iterations /= 10;
+    iterations.max_escape_iterations /= 2;
     iterations.min_escape_iterations /= 2;
   }
 }
@@ -414,45 +415,28 @@ static void SetResolution(int width, int height) {
 // If a filename has been set for saving the image, this will attempt to save
 // the image to the file.
 static void SaveImage(void) {
-  void *pixel_data;
-  SDL_Surface *image_surface = NULL;
-  int w = g.dimensions.w;
-  int h = g.dimensions.h;
-  // Don't do anything if the output filename wasn't set.
-  if (!g.output_image) return;
-
-  // In SDL 2, we need to copy the image from the renderer and create an SDL
-  // surface in order to save a bitmap.
-  pixel_data = malloc(w * h * 4);
+  uint8_t *pixel_data = NULL;
+  uint32_t pixel_count = g.dimensions.w * g.dimensions.h;
+  uint32_t i, base_offset;
+  // Allocate 3 bytes per pixel.
+  pixel_data = (uint8_t *) malloc(pixel_count * 3);
   if (!pixel_data) {
-    printf("Failed allocating space to save an image.\n");
-    CleanupGlobals();
-    exit(1);
+    printf("Failed allocating bitmap pixel data.\n");
+    return ;
   }
-  if (SDL_RenderReadPixels(g.renderer, NULL, SDL_PIXELFORMAT_RGBA8888,
-    pixel_data, w * 4) != 0) {
-    printf("Failed getting BMP image data: %s\n", SDL_GetError());
+  for (i = 0; i < pixel_count; i++) {
+    base_offset = i * 3;
+    pixel_data[base_offset] = g.color_channels[2][i];
+    pixel_data[base_offset + 1] = g.color_channels[1][i];
+    pixel_data[base_offset + 2] = g.color_channels[0][i];
+  }
+  if (!SaveBitmapFile(g.output_image, pixel_data, g.dimensions.w,
+    g.dimensions.h)) {
+    printf("Failed saving output file.\n");
     free(pixel_data);
-    CleanupGlobals();
-    exit(1);
+    return;
   }
-  image_surface = SDL_CreateRGBSurfaceFrom(pixel_data, w, h, 32, w * 4, 0xff,
-    0xff00, 0xff0000, 0xff000000);
-  if (!image_surface) {
-    printf("Failed creating BMP surface: %s\n", SDL_GetError());
-    free(pixel_data);
-    CleanupGlobals();
-    exit(1);
-  }
-  if (SDL_SaveBMP(image_surface, g.output_image) != 0) {
-    printf("Failed saving BMP file: %s\n", SDL_GetError());
-    SDL_FreeSurface(image_surface);
-    free(pixel_data);
-    CleanupGlobals();
-    exit(1);
-  }
-  printf("Successfully saved %s\n", g.output_image);
-  SDL_FreeSurface(image_surface);
+  printf("Saved output image OK.\n");
   free(pixel_data);
 }
 
@@ -522,10 +506,10 @@ static void ParseArguments(int argc, char **argv) {
 
 int main(int argc, char **argv) {
   memset(&g, 0, sizeof(g));
-  g.buddhabrot_iterations = 1000;
+  g.buddhabrot_iterations = 100;
   g.block_size = DEFAULT_BLOCK_SIZE;
   g.block_count = DEFAULT_BLOCK_COUNT;
-  SetResolution(1000, 1000);
+  SetResolution(4000, 4000);
   g.cuda_device = USE_DEFAULT_DEVICE;
   ParseArguments(argc, argv);
   printf("Calculating image...\n");
