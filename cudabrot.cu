@@ -70,8 +70,8 @@ static struct {
   FractalDimensions dimensions;
   // The host and device buffers which contain the numbers of times an escaping
   // point's path crossed each point in the complex plane.
-  uint32_t *device_buddhabrot;
-  uint32_t *host_buddhabrot;
+  uint64_t *device_buddhabrot;
+  uint64_t *host_buddhabrot;
   // Buffer for a single grayscale image.
   uint8_t *grayscale_image;
 } g;
@@ -124,16 +124,16 @@ static void SetupCUDA(void) {
 
   // Initialize the host and device image buffers.
   CheckCUDAError(cudaMalloc(&(g.device_buddhabrot), buffer_size *
-    sizeof(uint32_t)));
+    sizeof(uint64_t)));
   CheckCUDAError(cudaMemset(g.device_buddhabrot, 0, buffer_size *
-    sizeof(uint32_t)));
-  g.host_buddhabrot = (uint32_t *) malloc(buffer_size * sizeof(uint32_t));
+    sizeof(uint64_t)));
+  g.host_buddhabrot = (uint64_t *) malloc(buffer_size * sizeof(uint64_t));
   if (!g.host_buddhabrot) {
     printf("Failed allocating host buddhabrot buffer.\n");
     CleanupGlobals();
     exit(1);
   }
-  memset(g.host_buddhabrot, 0, buffer_size * sizeof(uint32_t));
+  memset(g.host_buddhabrot, 0, buffer_size * sizeof(uint64_t));
 
   // Initialize the RNG state for the device.
   CheckCUDAError(cudaMalloc(&(g.rng_states), g.block_size * g.block_count *
@@ -152,7 +152,7 @@ static void SetupCUDA(void) {
 
 // This should be used to update the pixel data for a point that is encountered
 // in the set.
-__device__ void IncrementPixelCounter(int row, int col, uint32_t *data,
+__device__ void IncrementPixelCounter(int row, int col, uint64_t *data,
     FractalDimensions *d) {
   int r, c;
   r = row;
@@ -164,7 +164,7 @@ __device__ void IncrementPixelCounter(int row, int col, uint32_t *data,
 
 // This kernel takes a list of points which escape the mandelbrot set, and, for
 // each iteration of the point, increments its location in the data array.
-__global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
+__global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
     IterationControl iterations, curandState_t *states) {
   int index = (blockIdx.x * blockDim.x) + threadIdx.x;
   curandState_t *rng = states + index;
@@ -227,7 +227,7 @@ static uint8_t Clamp(double v) {
 // 255.
 static double GetLinearColorScale(void) {
   int x, y, index;
-  uint32_t max = 0;
+  uint64_t max = 0;
   index = 0;
   for (y = 0; y < g.dimensions.h; y++) {
     for (x = 0; x < g.dimensions.w; x++) {
@@ -240,7 +240,7 @@ static double GetLinearColorScale(void) {
 
 // Returns the gamma-corrected 8-bit color channel value given a buddhabrot
 // iteration count c.
-static uint8_t DoGammaCorrection(uint32_t c, double linear_scale) {
+static uint8_t DoGammaCorrection(uint64_t c, double linear_scale) {
   double scaled = ((double) c) * linear_scale;
   scaled = 255 * log(c + 1) / log(255);
   return Clamp(255 * pow(scaled / 255, 1 / GAMMA_CORRECTION));
@@ -251,7 +251,7 @@ static void SetGrayscalePixels(void) {
   int x, y;
   uint8_t color_value;
   double linear_scale = GetLinearColorScale();
-  uint32_t *host_data = g.host_buddhabrot;
+  uint64_t *host_data = g.host_buddhabrot;
   uint8_t *grayscale = g.grayscale_image;
   for (y = 0; y < g.dimensions.h; y++) {
     for (x = 0; x < g.dimensions.w; x++) {
@@ -273,7 +273,7 @@ static void RenderImage(void) {
     g.device_buddhabrot, g.iterations, g.rng_states);
   CheckCUDAError(cudaGetLastError());
   CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
-    data_size * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+    data_size * sizeof(uint64_t), cudaMemcpyDeviceToHost));
   printf("Buddhabrot took %f seconds.\n", CurrentSeconds() - seconds);
   SetGrayscalePixels();
 }
@@ -299,7 +299,7 @@ static void SetResolution(int width, int height) {
 // If a filename has been set for saving the image, this will attempt to save
 // the image to the file.
 static void SaveImage(void) {
-  uint32_t pixel_count = g.dimensions.w * g.dimensions.h;
+  int pixel_count = g.dimensions.w * g.dimensions.h;
   FILE *output = fopen(g.output_image, "wb");
   if (!output) {
     printf("Failed opening output image.\n");
