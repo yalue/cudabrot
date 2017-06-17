@@ -27,7 +27,7 @@ extern "C" {
 
 // The gamma value to use for gamma correction, or 1.0 if no gamma correction
 // should be applied.
-#define GAMMA_CORRECTION (1.2)
+#define GAMMA_CORRECTION (1.1)
 
 // The number of color channels in the resulting image. Should be 3 for RBG.
 #define COLOR_CHANNELS (3)
@@ -46,6 +46,17 @@ typedef struct {
   double delta_real;
   double delta_imag;
 } FractalDimensions;
+
+// This struct holds the parameters for different types of "iterations" needed
+// when calculating the buddhabrot.
+typedef struct {
+  // Each CUDA thread in every block will sample this many random points.
+  int samples_per_thread;
+  // This is the maximum number of iterations to run to see if a point escapes.
+  int max_escape_iterations;
+  // If a point escapes in fewer than this many iterations, it will be ignored.
+  int min_escape_iterations;
+} IterationControl;
 
 // Holds globals in a single namespace.
 static struct {
@@ -193,15 +204,18 @@ static void SetupCUDA(void) {
 // in the set.
 __device__ void IncrementPixelCounter(int row, int col, uint32_t *data,
     FractalDimensions *d) {
-  if ((row >= 0) && (row < d->h) && (col >= 0) && (col < d->h)) {
-    data[row * d->w + col]++;
+  int r, c;
+  r = row;
+  c = col;
+  if ((r >= 0) && (r < d->h) && (c >= 0) && (c < d->h)) {
+    data[r * d->w + c] += 4;
   }
 }
 
 // This kernel takes a list of points which escape the mandelbrot set, and, for
 // each iteration of the point, increments its location in the data array.
 __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
-    int iterations, int mandelbrot_iterations, curandState_t *states) {
+    IterationControl iterations, curandState_t *states) {
   int index = (blockIdx.x * blockDim.x) + threadIdx.x;
   curandState_t *rng = states + index;
   int i, j, point_escaped, record_path, row, col;
@@ -210,7 +224,7 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
   float imag_range = dimensions.max_imag - dimensions.min_imag;
   record_path = 0;
   point_escaped = 1;
-  for (i = 0; i < iterations; i++) {
+  for (i = 0; i < iterations.samples_per_thread; i++) {
     // Calculate a new starting point only if the previous point didn't escape.
     // Otherwise, we'll use the same starting point, and record the point's
     // path.
@@ -221,7 +235,7 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
     point_escaped = 0;
     current_real = start_real;
     current_imag = start_imag;
-    for (j = 0; j < mandelbrot_iterations; j++) {
+    for (j = 0; j < iterations.max_escape_iterations; j++) {
       tmp = (current_real * current_real) - (current_imag * current_imag) +
         start_real;
       current_imag = 2 * current_real * current_imag + start_imag;
@@ -231,7 +245,8 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
       if (record_path) {
         IncrementPixelCounter(row, col, data, &dimensions);
       }
-      // If the point escapes, stop iterating and don't record the next loop.
+      // If the point escapes, stop iterating and indicate the loop ended due
+      // to the point escaping.
       if (((current_real * current_real) + (current_imag * current_imag)) >
         4) {
         point_escaped = 1;
@@ -241,7 +256,8 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint32_t *data,
     // Record the next path if the point didn't escape and we weren't already
     // recording.
     if (point_escaped && !record_path) {
-      record_path = 1;
+      // Enables ignoring paths that escape too quickly.
+      if (j > iterations.min_escape_iterations) record_path = 1;
     } else {
       record_path = 0;
     }
@@ -298,14 +314,17 @@ static void RenderImage(void) {
   int channel;
   size_t data_size = g.dimensions.w * g.dimensions.h;
   double seconds;
-  int buddhabrot_iterations = g.buddhabrot_iterations;
+  IterationControl iterations;
+  iterations.min_escape_iterations = 20;
+  iterations.samples_per_thread = 100;
+  iterations.max_escape_iterations = g.buddhabrot_iterations;
 
   for (channel = 0; channel < COLOR_CHANNELS; channel++) {
     printf("Calculating color channel %d.\n", channel);
     printf("Calculating buddhabrot.\n");
     seconds = CurrentSeconds();
     DrawBuddhabrot<<<g.block_count, g.block_size>>>(g.dimensions,
-       g.device_buddhabrot, 1000, g.buddhabrot_iterations, g.rng_states);
+       g.device_buddhabrot, iterations, g.rng_states);
     CheckCUDAError(cudaGetLastError());
     CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
       data_size * sizeof(uint32_t), cudaMemcpyDeviceToHost));
@@ -313,7 +332,8 @@ static void RenderImage(void) {
 
     SetColorChannel(g.color_channels[channel]);
     // Color channels will only differ by a fixed number of iterations for now.
-    buddhabrot_iterations /= 10;
+    iterations.max_escape_iterations /= 10;
+    iterations.min_escape_iterations /= 2;
   }
 }
 
@@ -505,7 +525,7 @@ int main(int argc, char **argv) {
   g.buddhabrot_iterations = 1000;
   g.block_size = DEFAULT_BLOCK_SIZE;
   g.block_count = DEFAULT_BLOCK_COUNT;
-  SetResolution(4000, 4000);
+  SetResolution(1000, 1000);
   g.cuda_device = USE_DEFAULT_DEVICE;
   ParseArguments(argc, argv);
   printf("Calculating image...\n");
