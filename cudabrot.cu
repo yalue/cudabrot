@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <curand.h>
 #include <curand_kernel.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,14 @@
 // This will be a magic value instructing the program to not explicitly set a
 // CUDA device.
 #define USE_DEFAULT_DEVICE (-1)
+
+// Increasing this may increase efficiency, but decrease responsiveness to
+// signals.
+#define SAMPLES_PER_THREAD (50)
+
+// If the number of max iterations exceeds this value, the samples per thread
+// will be reduced to 1 maintain responsiveness.
+#define SAMPLE_REDUCTION_THRESHOLD (20000)
 
 // Holds the boundaries and sizes of the fractal, in both pixels and numbers
 typedef struct {
@@ -60,6 +69,12 @@ static struct {
   // The filename to which a bitmap image will be saved, or NULL if an image
   // should not be saved.
   char *output_image;
+  // The number of seconds to run the calculation. If negative, wait for a
+  // signal instead.
+  int seconds_to_run;
+  // If this is nonzero, the program should save the image and quit as soon as
+  // the current iteration finishes.
+  int quit_signal_received;
   // Holds various iteration-related settings.
   IterationControl iterations;
   // The size and location of the fractal and output image.
@@ -115,10 +130,21 @@ __global__ void InitializeRNG(uint64_t seed, curandState_t *states) {
 // Allocates CUDA memory and calculates block/grid sizes. Must be called after
 // g.w and g.h have been set.
 static void SetupCUDA(void) {
+  float gpu_memory_needed, cpu_memory_needed;
   if (g.cuda_device != USE_DEFAULT_DEVICE) {
     CheckCUDAError(cudaSetDevice(g.cuda_device));
   }
   size_t buffer_size = g.dimensions.w * g.dimensions.h;
+  // The GPU will need space for the image and the RNG states.
+  gpu_memory_needed = buffer_size * sizeof(uint64_t) +
+    (g.block_size * g.block_count * sizeof(curandState_t));
+  gpu_memory_needed /= (1024.0 * 1024.0);
+  // The CPU needs space for the image and grayscale conversion.
+  cpu_memory_needed = buffer_size * sizeof(uint64_t) +
+    buffer_size * sizeof(uint16_t);
+  cpu_memory_needed /= (1024.0 * 1024.0);
+  printf("Approximate memory needed: %.03f MiB GPU, %.03f MiB CPU\n",
+    gpu_memory_needed, cpu_memory_needed);
 
   // Initialize the host and device image buffers.
   CheckCUDAError(cudaMalloc(&(g.device_buddhabrot), buffer_size *
@@ -271,16 +297,32 @@ static void SetGrayscalePixels(void) {
 
 // Renders the fractal image.
 static void RenderImage(void) {
+  int passes_count = 0;
   size_t data_size = g.dimensions.w * g.dimensions.h;
-  double seconds;
+  double start_seconds;
   printf("Calculating buddhabrot.\n");
-  seconds = CurrentSeconds();
-  DrawBuddhabrot<<<g.block_count, g.block_size>>>(g.dimensions,
-    g.device_buddhabrot, g.iterations, g.rng_states);
-  CheckCUDAError(cudaGetLastError());
+  if (g.seconds_to_run < 0) {
+    printf("Press ctrl+C to finish.\n");
+  } else {
+    printf("Running for %d seconds.\n", g.seconds_to_run);
+  }
+
+  // Run until either the time elapsed or we've received a SIGINT.
+  start_seconds = CurrentSeconds();
+  while (!g.quit_signal_received) {
+    if ((g.seconds_to_run >= 0) && ((CurrentSeconds() - start_seconds) >
+      g.seconds_to_run)) {
+      break;
+    }
+    passes_count++;
+    DrawBuddhabrot<<<g.block_count, g.block_size>>>(g.dimensions,
+      g.device_buddhabrot, g.iterations, g.rng_states);
+    CheckCUDAError(cudaDeviceSynchronize());
+  }
   CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
     data_size * sizeof(uint64_t), cudaMemcpyDeviceToHost));
-  printf("Buddhabrot took %f seconds.\n", CurrentSeconds() - seconds);
+  printf("%d buddhabrot passes took %f seconds.\n", passes_count,
+    CurrentSeconds() - start_seconds);
   SetGrayscalePixels();
 }
 
@@ -349,10 +391,11 @@ static void PrintUsage(char *program_name) {
     "     before giving up on seeing whether a point escapes.\n"
     "  -c <min escape iterations>: If a point escapes before this number of\n"
     "     iterations, it will be ignored.\n"
-    "  -s <samples per thread>: The number of samples each CUDA thread\n"
-    "     calculate.\n"
     "  -g <gamma correction>: A gamma-correction value to use on the\n"
     "     resulting image. If negative, no gamma correction will occur.\n"
+    "  -t <seconds to run>: A number of seconds to run the calculation for.\n"
+    "     Defaults to 10. If negative, the program will run continuously and\n"
+    "     will terminate (saving the image) when it receives a SIGINT.\n"
     "  -r <resolution>: Sets the number of pixels across one edge of the\n"
     "     square output image.\n");
   exit(0);
@@ -420,16 +463,16 @@ static void ParseArguments(int argc, char **argv) {
     }
     if (strcmp(argv[i], "-m") == 0) {
       g.iterations.max_escape_iterations = ParseIntArg(argc, argv, i);
+      if (g.iterations.max_escape_iterations > SAMPLE_REDUCTION_THRESHOLD) {
+        // Maintain responsiveness with a huge number of iterations by reducing
+        // the samples per thread.
+        g.iterations.samples_per_thread = 1;
+      }
       i++;
       continue;
     }
     if (strcmp(argv[i], "-c") == 0) {
       g.iterations.min_escape_iterations = ParseIntArg(argc, argv, i);
-      i++;
-      continue;
-    }
-    if (strcmp(argv[i], "-s") == 0) {
-      g.iterations.samples_per_thread = ParseIntArg(argc, argv, i);
       i++;
       continue;
     }
@@ -444,23 +487,42 @@ static void ParseArguments(int argc, char **argv) {
       i++;
       continue;
     }
+    if (strcmp(argv[i], "-t") == 0) {
+      g.seconds_to_run = ParseIntArg(argc, argv, i);
+      i++;
+      continue;
+    }
     // Unrecognized argument, print the usage string.
     printf("Invalid argument: %s\n", argv[i]);
     PrintUsage(argv[0]);
   }
 }
 
+void SignalHandler(int signal_number) {
+  g.quit_signal_received = 1;
+  printf("Signal %d received, waiting for current pass to finish...\n",
+    signal_number);
+}
+
 int main(int argc, char **argv) {
   memset(&g, 0, sizeof(g));
   g.iterations.max_escape_iterations = 100;
   g.iterations.min_escape_iterations = 20;
-  g.iterations.samples_per_thread = 2000;
+  g.iterations.samples_per_thread = SAMPLES_PER_THREAD;
   g.block_size = DEFAULT_BLOCK_SIZE;
   g.block_count = DEFAULT_BLOCK_COUNT;
+  g.seconds_to_run = 10;
   g.gamma_correction = 1.0;
   SetResolution(4000, 4000);
   g.cuda_device = USE_DEFAULT_DEVICE;
   ParseArguments(argc, argv);
+  if (g.seconds_to_run < 0) {
+    if (signal(SIGINT, SignalHandler) == SIG_ERR) {
+      printf("Failed setting signal handler.\n");
+      CleanupGlobals();
+      return 1;
+    }
+  }
   printf("Creating %dx%d image, %d samples per thread, %d max iterations.\n",
     g.dimensions.w, g.dimensions.h, g.iterations.samples_per_thread,
     g.iterations.max_escape_iterations);
