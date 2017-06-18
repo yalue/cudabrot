@@ -71,7 +71,7 @@ static struct {
   // The gamma value for gamma correction.
   double gamma_correction;
   // Buffer for a single grayscale image.
-  uint8_t *grayscale_image;
+  uint16_t *grayscale_image;
 } g;
 
 // If any globals have been initialized, this will free them. (Relies on
@@ -139,13 +139,13 @@ static void SetupCUDA(void) {
   InitializeRNG<<<g.block_size, g.block_count>>>(1337, g.rng_states);
   CheckCUDAError(cudaDeviceSynchronize());
 
-  g.grayscale_image = (uint8_t *) malloc(buffer_size);
+  g.grayscale_image = (uint16_t *) malloc(buffer_size * sizeof(uint16_t));
   if (!g.grayscale_image) {
     printf("Failed allocating grayscale image.\n");
     CleanupGlobals();
     exit(1);
   }
-  memset(g.grayscale_image, 0, buffer_size);
+  memset(g.grayscale_image, 0, buffer_size * sizeof(uint16_t));
 }
 
 // This should be used to update the pixel data for a point that is encountered
@@ -217,15 +217,15 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
   }
 }
 
-static uint8_t Clamp(double v) {
+static uint16_t Clamp(double v) {
   if (v <= 0) return 0;
-  if (v >= 255) return 255;
-  return (uint8_t) v;
+  if (v >= 0xffff) return 0xffff;
+  return (uint16_t) v;
 }
 
 // Returns the amount to multiply the original count by in order to get a value
 // by which buddhabrot counts can be multiplied to get a number between 0 and
-// 255.
+// 0xffff.
 static double GetLinearColorScale(void) {
   int x, y, index;
   uint64_t max = 0;
@@ -237,27 +237,28 @@ static double GetLinearColorScale(void) {
       index++;
     }
   }
-  to_return = 255.0 / ((double) max);
+  to_return = ((double) 0xffff) / ((double) max);
   printf("Max value: %lu, scale: %f\n", (unsigned long) max, to_return);
   return to_return;
 }
 
 // Returns the gamma-corrected 8-bit color channel value given a buddhabrot
 // iteration count c.
-static uint8_t DoGammaCorrection(uint64_t c, double linear_scale) {
+static uint16_t DoGammaCorrection(uint64_t c, double linear_scale) {
+  double max = 0xffff;
   double scaled = ((double) c) * linear_scale;
   // Don't do gamma correction if the gamma correction argument was negative.
   if (g.gamma_correction <= 0.0) return scaled;
-  return Clamp(255 * pow(scaled / 255, 1 / g.gamma_correction));
+  return Clamp(max * pow(scaled / max, 1 / g.gamma_correction));
 }
 
 // Fills in a single color channel from the current host_buddhabrot buffer.
 static void SetGrayscalePixels(void) {
   int x, y;
-  uint8_t color_value;
+  uint16_t color_value;
   double linear_scale = GetLinearColorScale();
   uint64_t *host_data = g.host_buddhabrot;
-  uint8_t *grayscale = g.grayscale_image;
+  uint16_t *grayscale = g.grayscale_image;
   for (y = 0; y < g.dimensions.h; y++) {
     for (x = 0; x < g.dimensions.w; x++) {
       color_value = DoGammaCorrection(*host_data, linear_scale);
@@ -302,27 +303,37 @@ static void SetResolution(int width, int height) {
 }
 
 // If a filename has been set for saving the image, this will attempt to save
-// the image to the file.
+// the image to the file. This can modify the image buffer! (For changing byte
+// order.)
 static void SaveImage(void) {
+  uint16_t tmp;
+  int i;
   int pixel_count = g.dimensions.w * g.dimensions.h;
   FILE *output = fopen(g.output_image, "wb");
   if (!output) {
     printf("Failed opening output image.\n");
     return;
   }
-  if (fprintf(output, "P5\n%d %d\n%d\n", g.dimensions.w, g.dimensions.h, 255)
-    <= 0) {
+  if (fprintf(output, "P5\n%d %d\n%d\n", g.dimensions.w, g.dimensions.h,
+    0xffff) <= 0) {
     printf("Failed writing pgm header.\n");
     fclose(output);
     return;
   }
-  if (!fwrite(g.grayscale_image, pixel_count, 1, output)) {
+  // Flip the byte-order for the image. This assumes the program is running on
+  // a little-endian architecture. I'll fix it if there's ever a demand to run
+  // this on something other than Linux on x86 or ARM64 (lol).
+  for (i = 0; i < pixel_count; i++) {
+    tmp = g.grayscale_image[i];
+    tmp = ((tmp & 0xff) << 8) | (tmp >> 8);
+    g.grayscale_image[i] = tmp;
+  }
+  if (!fwrite(g.grayscale_image, pixel_count * sizeof(uint16_t), 1, output)) {
     printf("Failed writing pixel data.\n");
     fclose(output);
     return;
   }
   fclose(output);
-  printf("PGM image created OK.\n");
 }
 
 static void PrintUsage(char *program_name) {
@@ -450,11 +461,15 @@ int main(int argc, char **argv) {
   SetResolution(4000, 4000);
   g.cuda_device = USE_DEFAULT_DEVICE;
   ParseArguments(argc, argv);
+  printf("Creating %dx%d image, %d samples per thread, %d max iterations.\n",
+    g.dimensions.w, g.dimensions.h, g.iterations.samples_per_thread,
+    g.iterations.max_escape_iterations);
   printf("Calculating image...\n");
   SetupCUDA();
   RenderImage();
   printf("Done! Saving image.\n");
   SaveImage();
+  printf("Output image saved.\n");
   CleanupGlobals();
   return 0;
 }
