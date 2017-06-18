@@ -22,10 +22,6 @@
 // CUDA device.
 #define USE_DEFAULT_DEVICE (-1)
 
-// The gamma value to use for gamma correction, or 1.0 if no gamma correction
-// should be applied.
-#define GAMMA_CORRECTION (1.0)
-
 // Holds the boundaries and sizes of the fractal, in both pixels and numbers
 typedef struct {
   // The width and height of the image in pixels.
@@ -72,6 +68,8 @@ static struct {
   // point's path crossed each point in the complex plane.
   uint64_t *device_buddhabrot;
   uint64_t *host_buddhabrot;
+  // The gamma value for gamma correction.
+  double gamma_correction;
   // Buffer for a single grayscale image.
   uint8_t *grayscale_image;
 } g;
@@ -158,7 +156,10 @@ __device__ void IncrementPixelCounter(int row, int col, uint64_t *data,
   r = row;
   c = col;
   if ((r >= 0) && (r < d->h) && (c >= 0) && (c < d->h)) {
-    data[r * d->w + c] += 4;
+    // I still can't wrap my head around why this makes a difference, but
+    // having this be 4 rather than 1 makes it look quite a bit better usually,
+    // mostly because it's brighter.
+    data[r * d->w + c] += 1;
   }
 }
 
@@ -228,6 +229,7 @@ static uint8_t Clamp(double v) {
 static double GetLinearColorScale(void) {
   int x, y, index;
   uint64_t max = 0;
+  double to_return;
   index = 0;
   for (y = 0; y < g.dimensions.h; y++) {
     for (x = 0; x < g.dimensions.w; x++) {
@@ -235,15 +237,18 @@ static double GetLinearColorScale(void) {
       index++;
     }
   }
-  return 255.0 / ((double) max);
+  to_return = 255.0 / ((double) max);
+  printf("Max value: %lu, scale: %f\n", (unsigned long) max, to_return);
+  return to_return;
 }
 
 // Returns the gamma-corrected 8-bit color channel value given a buddhabrot
 // iteration count c.
 static uint8_t DoGammaCorrection(uint64_t c, double linear_scale) {
   double scaled = ((double) c) * linear_scale;
-  scaled = 255 * log(c + 1) / log(255);
-  return Clamp(255 * pow(scaled / 255, 1 / GAMMA_CORRECTION));
+  // Don't do gamma correction if the gamma correction argument was negative.
+  if (g.gamma_correction <= 0.0) return scaled;
+  return Clamp(255 * pow(scaled / 255, 1 / g.gamma_correction));
 }
 
 // Fills in a single color channel from the current host_buddhabrot buffer.
@@ -330,7 +335,15 @@ static void PrintUsage(char *program_name) {
     "     to a bitmap file with the given name, in addition to being\n"
     "     displayed in a window.\n"
     "  -m <max escape iterations>: The maximum number of iterations to use\n"
-    "     before giving up on seeing whether a point escapes.\n");
+    "     before giving up on seeing whether a point escapes.\n"
+    "  -c <min escape iterations>: If a point escapes before this number of\n"
+    "     iterations, it will be ignored.\n"
+    "  -s <samples per thread>: The number of samples each CUDA thread\n"
+    "     calculate.\n"
+    "  -g <gamma correction>: A gamma-correction value to use on the\n"
+    "     resulting image. If negative, no gamma correction will occur.\n"
+    "  -r <resolution>: Sets the number of pixels across one edge of the\n"
+    "     square output image.\n");
   exit(0);
 }
 
@@ -344,7 +357,27 @@ static int ParseIntArg(int argc, char **argv, int index) {
     PrintUsage(argv[0]);
   }
   to_return = strtol(argv[index + 1], &tmp, 10);
-  if (*tmp != 0) {
+  // Make sure that, if tmp is a null character, that the argument wasn't
+  // simply a string with no content.
+  if ((*tmp != 0) || (argv[index + 1][0] == 0)) {
+    printf("Invalid number given to argument %s: %s\n", argv[index],
+      argv[index + 1]);
+    PrintUsage(argv[0]);
+  }
+  return to_return;
+}
+
+// Returns a double at the argument after indexin argv. Exits if the double is
+// invalid.
+static double ParseDoubleArg(int argc, char **argv, int index) {
+  char *tmp = NULL;
+  double to_return = 0.0;
+  if ((index + 1) >= argc) {
+    printf("Argument %s needs a value.\n", argv[index]);
+    PrintUsage(argv[0]);
+  }
+  to_return = strtod(argv[index + 1], &tmp);
+  if ((*tmp != 0) || (argv[index + 1][0] == 0)) {
     printf("Invalid number given to argument %s: %s\n", argv[index],
       argv[index + 1]);
     PrintUsage(argv[0]);
@@ -355,6 +388,7 @@ static int ParseIntArg(int argc, char **argv, int index) {
 // Processes command-line arguments, setting values in the globals struct as
 // necessary.
 static void ParseArguments(int argc, char **argv) {
+  int new_resolution;
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--help") == 0) {
       PrintUsage(argv[0]);
@@ -378,6 +412,27 @@ static void ParseArguments(int argc, char **argv) {
       i++;
       continue;
     }
+    if (strcmp(argv[i], "-c") == 0) {
+      g.iterations.min_escape_iterations = ParseIntArg(argc, argv, i);
+      i++;
+      continue;
+    }
+    if (strcmp(argv[i], "-s") == 0) {
+      g.iterations.samples_per_thread = ParseIntArg(argc, argv, i);
+      i++;
+      continue;
+    }
+    if (strcmp(argv[i], "-r") == 0) {
+      new_resolution = ParseIntArg(argc, argv, i);
+      SetResolution(new_resolution, new_resolution);
+      i++;
+      continue;
+    }
+    if (strcmp(argv[i], "-g") == 0) {
+      g.gamma_correction = ParseDoubleArg(argc, argv, i);
+      i++;
+      continue;
+    }
     // Unrecognized argument, print the usage string.
     printf("Invalid argument: %s\n", argv[i]);
     PrintUsage(argv[0]);
@@ -391,6 +446,7 @@ int main(int argc, char **argv) {
   g.iterations.samples_per_thread = 2000;
   g.block_size = DEFAULT_BLOCK_SIZE;
   g.block_count = DEFAULT_BLOCK_COUNT;
+  g.gamma_correction = 1.0;
   SetResolution(4000, 4000);
   g.cuda_device = USE_DEFAULT_DEVICE;
   ParseArguments(argc, argv);
