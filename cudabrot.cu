@@ -174,6 +174,24 @@ static void SetupCUDA(void) {
   memset(g.grayscale_image, 0, buffer_size * sizeof(uint16_t));
 }
 
+// This returns nonzero if the given point is in the main cardioid of the set
+// and is therefore guaranteed to not escape.
+__device__ int InMainCardioid(double real, double imag) {
+  // This algorithm was taken from the Wikipedia Mandelbrot set page.
+  double imag_squared = imag * imag;
+  double q = (real - 0.25);
+  q = q * q + imag_squared;
+  return q * (q + (real - 0.25)) < (imag_squared * 0.25);
+}
+
+// This returns nonzero if the given point is in the order 2 bulb of the set
+// and therefore guaranteed to not escape.
+__device__ int InOrder2Bulb(double real, double imag) {
+  double tmp = real + 1;
+  tmp = tmp * tmp;
+  return (tmp + (imag * imag)) < (1.0 / 16.0);
+}
+
 // This should be used to update the pixel data for a point that is encountered
 // in the set.
 __device__ void IncrementPixelCounter(int row, int col, uint64_t *data,
@@ -195,7 +213,7 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
     IterationControl iterations, curandState_t *states) {
   int index = (blockIdx.x * blockDim.x) + threadIdx.x;
   curandState_t *rng = states + index;
-  int i, j, point_escaped, record_path, row, col;
+  int i, j, skip_point, point_escaped, record_path, row, col;
   double start_real, start_imag, current_real, current_imag, tmp;
   double real_range = dimensions.max_real - dimensions.min_real;
   double imag_range = dimensions.max_imag - dimensions.min_imag;
@@ -214,7 +232,16 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
     point_escaped = 0;
     current_real = start_real;
     current_imag = start_imag;
+    // Rather than nesting another if statement (which wouldn't help on the
+    // GPU anyway), set the skip_point flag if we know it'll remain in the set,
+    // and break out of the loop immediately if it does.
+    skip_point = InMainCardioid(current_real, current_imag) || InOrder2Bulb(
+      current_real, current_imag);
     for (j = 0; j < iterations.max_escape_iterations; j++) {
+      if (skip_point) {
+        point_escaped = 0;
+        break;
+      }
       tmp = (current_real * current_real) - (current_imag * current_imag) +
         start_real;
       current_imag = 2 * current_real * current_imag + start_imag;
