@@ -11,6 +11,10 @@ excellent use case for CUDA (see further down in the description for some
 examples). Additionally, neither of the other projects appeared to be recently-
 updated or well-documented.
 
+For information on how the Buddhabrot set is rendered, see the
+[Wikipedia article](https://en.wikipedia.org/wiki/Buddhabrot) for information
+about the algorithm and the relationship to the Mandelbrot set.
+
 Usage
 -----
 
@@ -75,3 +79,22 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of memory.
     - `./cudabrot -r 200 -m 1000 -c 100 -t 10 -g 1.5`:<br />
       ![1.5 Gamma](examples/gamma_1_5.png)
 
+    - `./cudabrot -r 200 -m 1000 -c 100 -t 10 -g 2.2`:<br />
+      ![2.2 Gamma](examples/gamma_2_2.png)
+
+
+ - `-m <max escape iterations>`: Example: `./cudabrot -m 10000`. This option
+   specifies the maximum iterations to follow each particle before determining
+   whether it remains in the Mandelbrot set (meaning that its path is included
+   in the buddhabrot set). In short, increasing this value will produce more
+   "fine" details in the resulting image. This value defaults to 100, which is
+   a fairly low value. See these examples:
+
+    - `./cudabrot -r 200 -t 10 -c 20 -m 100`:<br />
+      ![Low max iterations](examples/max_100.png)
+
+    - `./cudabrot -r 200 -t 10 -c 20 -m 1000`:<br />
+      ![Low max iterations](examples/max_1000.png)
+
+    - `./cudabrot -r 200 -t 10 -c 20 -m 20000`:<br />
+      ![Low max iterations](examples/max_20000.png)
