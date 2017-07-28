@@ -73,5 +73,5 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of memory.
       ![No gamma correction](examples/gamma_1_0.png)
 
     - `./cudabrot -r 500 -m 1000 -c 100 -t 10 -g 1.5`:<br />
-      <img src="examples/gamma_1_5.png" alt="Gamma 1.5" height="150" width="150" />
+      ![1.5 Gamma](examples/gamma_1_5.png)
 
