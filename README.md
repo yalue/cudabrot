@@ -69,9 +69,9 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of memory.
    This option defaults to 1.0 (no gamma correction).
    Example images:
 
-    - `./cudabrot -r 500 -m 1000 -c 100 -t 10 -g 1.0`:
+    - `./cudabrot -r 500 -m 1000 -c 100 -t 10 -g 1.0`:<br />
       ![No gamma correction](examples/gamma_1_0.png)
 
-    - `./cudabrot -r 500 -m 1000 -c 100 -t 10 -g 1.5`:
-      ![Gamma 1.5](examples/gamma_1_5.png)
+    - `./cudabrot -r 500 -m 1000 -c 100 -t 10 -g 1.5`:<br />
+      <img src="examples/gamma_1_5.pgn" alt="Gamma 1.5" height="150" width="150" />
 
