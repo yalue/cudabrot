@@ -15,6 +15,9 @@
 // Controls the default number of blocks to use.
 #define DEFAULT_BLOCK_COUNT (16)
 
+// The name given to the output file if one isn't specified.
+#define DEFAULT_OUTPUT_NAME "output.pgm"
+
 // This macro takes a cudaError_t value and exits the program if it isn't equal
 // to cudaSuccess. (Calls the ErrorCheck function, defined later).
 #define CheckCUDAError(val) (InternalCUDAErrorCheck((val), #val, __FILE__, __LINE__))
@@ -29,7 +32,7 @@
 
 // If the number of max iterations exceeds this value, the samples per thread
 // will be reduced to 1 maintain responsiveness.
-#define SAMPLE_REDUCTION_THRESHOLD (20000)
+#define SAMPLE_REDUCTION_THRESHOLD (40000)
 
 // Holds the boundaries and sizes of the fractal, in both pixels and numbers
 typedef struct {
@@ -68,7 +71,7 @@ static struct {
   int block_size, block_count;
   // The filename to which a bitmap image will be saved, or NULL if an image
   // should not be saved.
-  char *output_image;
+  const char *output_image;
   // The number of seconds to run the calculation. If negative, wait for a
   // signal instead.
   int seconds_to_run;
@@ -337,14 +340,14 @@ static void RenderImage(void) {
   // Run until either the time elapsed or we've received a SIGINT.
   start_seconds = CurrentSeconds();
   while (!g.quit_signal_received) {
-    if ((g.seconds_to_run >= 0) && ((CurrentSeconds() - start_seconds) >
-      g.seconds_to_run)) {
-      break;
-    }
     passes_count++;
     DrawBuddhabrot<<<g.block_count, g.block_size>>>(g.dimensions,
       g.device_buddhabrot, g.iterations, g.rng_states);
     CheckCUDAError(cudaDeviceSynchronize());
+    if ((g.seconds_to_run >= 0) && ((CurrentSeconds() - start_seconds) >
+      g.seconds_to_run)) {
+      break;
+    }
   }
   CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
     data_size * sizeof(uint64_t), cudaMemcpyDeviceToHost));
@@ -533,6 +536,7 @@ void SignalHandler(int signal_number) {
 
 int main(int argc, char **argv) {
   memset(&g, 0, sizeof(g));
+  g.output_image = DEFAULT_OUTPUT_NAME;
   g.iterations.max_escape_iterations = 100;
   g.iterations.min_escape_iterations = 20;
   g.iterations.samples_per_thread = SAMPLES_PER_THREAD;
