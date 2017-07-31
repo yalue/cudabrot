@@ -101,4 +101,4 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of memory.
 
     | `./cudabrot -r 200 -t 30 -m 20000 -c 20` | `./cudabrot -r 200 -t 30 -m 20000 -c 2000` | `./cudabrot -r 200 -t 30 -m 20000 -c 10000` |
     | :---: | :---: | :---: |
-    | ![Low cutoff](examples/cutoff_20.png) | ![Mid cutoff](examples/cutoff_2000.png) | ![High cutoff](examples/cutoff_10000) |
+    | ![Low cutoff](examples/cutoff_20.png) | ![Mid cutoff](examples/cutoff_2000.png) | ![High cutoff](examples/cutoff_10000.png) |
