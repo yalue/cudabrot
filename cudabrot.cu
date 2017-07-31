@@ -60,7 +60,7 @@ typedef struct {
   int min_escape_iterations;
 } IterationControl;
 
-// Holds globals in a single namespace.
+// Holds global state in a single struct.
 static struct {
   // The CUDA device to use. If this is -1, a device won't be set, which should
   // fall back to CUDA's normal device.
@@ -308,7 +308,9 @@ static uint16_t DoGammaCorrection(uint64_t c, double linear_scale) {
   return Clamp(max * pow(scaled / max, 1 / g.gamma_correction));
 }
 
-// Fills in a single color channel from the current host_buddhabrot buffer.
+// Converts the buffer of 64-bit pixel values to a gamma-corrected grayscale
+// image with 16-bit colors. The 64-bit values are scaled to fill the 16-bit
+// color range.
 static void SetGrayscalePixels(void) {
   int x, y;
   uint16_t color_value;
@@ -349,6 +351,9 @@ static void RenderImage(void) {
       break;
     }
   }
+
+  // Copy the resulting image to CPU memory, and convert the pixels to proper
+  // grayscale values.
   CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
     data_size * sizeof(uint64_t), cudaMemcpyDeviceToHost));
   printf("%d buddhabrot passes took %f seconds.\n", passes_count,

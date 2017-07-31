@@ -4,14 +4,17 @@ CUDAbrot: A "Buddhabrot" Renderer using CUDA
 About
 -----
 
-First off: I'm aware that there are at least two other github projects named
-"cudabrot", but both of them render the Mandelbrot set rather than the
-Buddhabrot, which is a (more processing-intensive) variation and, therefore, an
-excellent use case for CUDA (see further down in the description for some
-examples). Additionally, neither of the other projects appeared to be recently-
-updated or well-documented.
+This project contains a small CUDA program for rendering the Buddhabrot fractal
+using a CUDA-capable GPU.
 
-For information on how the Buddhabrot set is rendered, see the
+I'm aware that there are at least two other github projects named "cudabrot",
+but both of them render the Mandelbrot set rather than the Buddhabrot. The
+Buddhabrot set is a variant of the Mandelbrot set similar to an
+[attractor](https://en.wikipedia.org/wiki/Attractor), and is generally more
+processor-intensive to render. Therefore, rendering high-resolution Buddhabrot
+images is an excellent application of GPU computing.
+
+For more information on how the Buddhabrot set is rendered, see the
 [Wikipedia article](https://en.wikipedia.org/wiki/Buddhabrot) for information
 about the algorithm and the relationship to the Mandelbrot set.
 
@@ -31,7 +34,7 @@ assigning each single-channel image to a color in the output image.
 Examples and detailed description of options
 --------------------------------------------
 
-All examples below were rendered using an NVIDIA GTX 970 with 4GB of memory.
+All examples below were rendered using an NVIDIA GTX 970 with 4GB of GPU RAM.
 
  - `-d <device number>`: Example: `./cudabrot -d 0`. If you have more than one
    GPU, providing the `-d` flag along with a device number allows you to run
