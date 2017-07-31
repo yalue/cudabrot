@@ -80,9 +80,9 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of memory.
  - `-m <max escape iterations>`: Example: `./cudabrot -m 10000`. This option
    specifies the maximum iterations to follow each particle before determining
    whether it remains in the Mandelbrot set (meaning that its path is included
-   in the buddhabrot set). In short, increasing this value will produce more
-   "fine" details in the resulting image. This value defaults to 100, which is
-   a fairly low value. See these examples:
+   in the Buddhabrot set). In short, increasing this value will include more
+   fine details in the resulting image. This value defaults to 100, which is a
+   fairly low value. See these examples:
 
     | `./cudabrot -r 200 -t 10 -c 20 -m 100` | `./cudabrot -r 200 -t 10 -c 20 -m 1000` | `./cudabrot -r 200 -t 10 -c 20 -m 20000` |
     | :---: | :---: | :---: |
@@ -92,13 +92,41 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of memory.
    option specifies the minimum cutoff for the number of iterations which
    points must *remain* in the Mandelbrot set if they are to be included in
    the Buddhabrot. Increasing the minimum cutoff iterations will therefore
-   reduce the "cloudiness" of the generated image, because points that
-   escape only after a large number of iterations typically are part of some
-   orbital path. In short, increase this value to enhance the visibility of the
-   details produced when using higher numbers of iterations. This value
-   defaults to 20, which will produce a cloudy, nebulous image.
+   reduce the "cloudiness" of the generated image, enhancing the visibility of
+   the details produced when using higher `-m` values. This value defaults to
+   20, which will produce a cloudy, nebulous image.
    See these examples:
 
     | `./cudabrot -r 200 -t 30 -g 1.8 -m 20000 -c 20` | `./cudabrot -r 200 -t 30 -g 1.8 -m 20000 -c 2000` | `./cudabrot -r 200 -t 30 -g 1.8 -m 20000 -c 10000` |
     | :---: | :---: | :---: |
     | ![Low cutoff](examples/cutoff_20.png) | ![Mid cutoff](examples/cutoff_2000.png) | ![High cutoff](examples/cutoff_10000.png) |
+
+Coloring the Buddhabrot
+-----------------------
+
+The Buddhabrot rendering maps most easily to grayscale images, so coloring is
+left to post-processing. The "traditional" way to color a Buddhabrot is to
+generate several grayscale images using different minimum and maximum iteration
+values (the `-r` and `-c` options in this program). The grayscale images can
+then be combined into a single output image, with each grayscale image
+contributing to a different color channel in the output.
+
+A free program that can be used to combine grayscale images into a single color
+image exists [in a separate repository](https://github.com/yalue/image_combiner).
+
+Here's an example of how to create a color image, using the `image_combiner`
+tool linked above:
+
+```bash
+./cudabrot -g 2.0 -r 1000 -m 100 -c 20 -t 20 -o low_iterations.pgm
+./cudabrot -g 2.0 -r 1000 -m 2000 -c 600 -t 20 -o mid_iterations.pgm
+./cudabrot -g 2.5 -r 1000 -m 10000 -c 9000 -t 40 -o high_iterations.pgm
+./image_combiner \
+    low_iterations.pgm blue \
+    mid_iterations.pgm lime \
+    high_iterations.pgm red \
+    color_output.jpg
+```
+
+The above commands result in this colored image:
+![color Buddhabrot](examples/color_output.jpg)
