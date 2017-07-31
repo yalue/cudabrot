@@ -27,7 +27,7 @@ installed (the more recent the version, the better), and a CUDA-capable GPU.
 Compile the program simply by running `make`. Run it by running `./cudabrot`.
 A summary of command-line arguments can be obtained by running
 `./cudabrot --help`. Running the program will produce a single grayscale image.
-Typically, a colored buddhabrot image is created by rendering several single-
+Typically, a colored Buddhabrot image is created by rendering several single-
 channel images with different parameters, then combining the results by
 assigning each single-channel image to a color in the output image.
 
