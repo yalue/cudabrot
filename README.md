@@ -73,8 +73,8 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of memory.
    This option defaults to 1.0 (no gamma correction).
    Example images:
 
-    | `./cudabrot -r 150 -m 10000 -c 8000 -t 30 -g 1.0` | `./cudabrot -r 150 -m 10000 -c 8000 -t 30 -g 1.5` | `./cudabrot -r 150 -m 10000 -c 8000 -t 30 -g 2.2` |
-    | --- | --- | --- |
+    | `./cudabrot -r 200 -m 10000 -c 8000 -t 30 -g 1.0` | `./cudabrot -r 200 -m 10000 -c 8000 -t 30 -g 1.5` | `./cudabrot -r 200 -m 10000 -c 8000 -t 30 -g 2.2` |
+    | :---: | :---: | :---: |
     | ![No gamma correction](examples/gamma_1_0.png) | ![1.5 gamma](examples/gamma_1_5.png) | ![2.2 gamma](examples/gamma_2_2.png) |
 
  - `-m <max escape iterations>`: Example: `./cudabrot -m 10000`. This option
@@ -84,11 +84,7 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of memory.
    "fine" details in the resulting image. This value defaults to 100, which is
    a fairly low value. See these examples:
 
-    - `./cudabrot -r 200 -t 10 -c 20 -m 100`:<br />
-      ![Low max iterations](examples/max_100.png)
+    | `./cudabrot -r 200 -t 10 -c 20 -m 100` | `./cudabrot -r 200 -t 10 -c 20 -m 1000` | `./cudabrot -r 200 -t 10 -c 20 -m 20000` |
+    | :---: | :---: | :---: |
+    | ![Low max iterations](examples/max_100.png) | ![Mid max iterations](examples/max_1000.png) | ![High max iterations](examples/max_20000.png) |
 
-    - `./cudabrot -r 200 -t 10 -c 20 -m 1000`:<br />
-      ![Low max iterations](examples/max_1000.png)
-
-    - `./cudabrot -r 200 -t 10 -c 20 -m 20000`:<br />
-      ![Low max iterations](examples/max_20000.png)
