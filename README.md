@@ -92,13 +92,12 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of GPU RAM.
     | ![Low max iterations](examples/max_100.png) | ![Mid max iterations](examples/max_1000.png) | ![High max iterations](examples/max_20000.png) |
 
  - `-c <min escape iterations`: Example: `./cudabrot -m 5000 -c 4000`. This
-   option specifies the minimum cutoff for the number of iterations which
+   option specifies the minimum cutoff for the number of iterations for which
    points must *remain* in the Mandelbrot set if they are to be included in
    the Buddhabrot. Increasing the minimum cutoff iterations will therefore
    reduce the "cloudiness" of the generated image, enhancing the visibility of
-   the details produced when using higher `-m` values. This value defaults to
-   20, which will produce a cloudy, nebulous image.
-   See these examples:
+   the details produced using higher `-m` values. This value defaults to 20,
+   which will produce a cloudy, nebulous image. See these examples:
 
     | `./cudabrot -r 200 -t 30 -g 1.8 -m 20000 -c 20` | `./cudabrot -r 200 -t 30 -g 1.8 -m 20000 -c 2000` | `./cudabrot -r 200 -t 30 -g 1.8 -m 20000 -c 10000` |
     | :---: | :---: | :---: |

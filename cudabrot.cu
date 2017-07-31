@@ -50,7 +50,7 @@ typedef struct {
 } FractalDimensions;
 
 // This struct holds the parameters for different types of "iterations" needed
-// when calculating the buddhabrot.
+// when calculating the Buddhabrot.
 typedef struct {
   // Each CUDA thread in every block will sample this many random points.
   int samples_per_thread;
@@ -67,7 +67,7 @@ static struct {
   int cuda_device;
   // This tracks the random number generator states for the GPU code.
   curandState_t *rng_states;
-  // The number of threads and blocks to use when calculating the buddhabrot.
+  // The number of threads and blocks to use when calculating the Buddhabrot.
   int block_size, block_count;
   // The filename to which a bitmap image will be saved, or NULL if an image
   // should not be saved.
@@ -97,6 +97,7 @@ static struct {
 static void CleanupGlobals(void) {
   if (g.rng_states) cudaFree(g.rng_states);
   if (g.device_buddhabrot) cudaFree(g.device_buddhabrot);
+  if (g.rng_states) cudaFree(g.rng_states);
   if (g.grayscale_image) free(g.grayscale_image);
   memset(&g, 0, sizeof(g));
 }
@@ -123,7 +124,7 @@ static void InternalCUDAErrorCheck(cudaError_t result, const char *fn,
 }
 
 // This function is used to initialize the RNG states to use when generating
-// starting points in the buddhabrot calculation. The states array must hold
+// starting points in the Buddhabrot calculation. The states array must hold
 // one entry for every thread in every block.
 __global__ void InitializeRNG(uint64_t seed, curandState_t *states) {
   int index = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -156,7 +157,7 @@ static void SetupCUDA(void) {
     sizeof(uint64_t)));
   g.host_buddhabrot = (uint64_t *) malloc(buffer_size * sizeof(uint64_t));
   if (!g.host_buddhabrot) {
-    printf("Failed allocating host buddhabrot buffer.\n");
+    printf("Failed allocating host Buddhabrot buffer.\n");
     CleanupGlobals();
     exit(1);
   }
@@ -203,14 +204,11 @@ __device__ void IncrementPixelCounter(int row, int col, uint64_t *data,
   r = row;
   c = col;
   if ((r >= 0) && (r < d->h) && (c >= 0) && (c < d->h)) {
-    // I still can't wrap my head around why this makes a difference, but
-    // having this be 4 rather than 1 makes it look quite a bit better usually,
-    // mostly because it's brighter.
     data[r * d->w + c] += 1;
   }
 }
 
-// This kernel takes a list of points which escape the mandelbrot set, and, for
+// This kernel takes a list of points which escape the Mandelbrot set, and, for
 // each iteration of the point, increments its location in the data array.
 __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
     IterationControl iterations, curandState_t *states) {
@@ -280,7 +278,7 @@ static uint16_t Clamp(double v) {
 }
 
 // Returns the amount to multiply the original count by in order to get a value
-// by which buddhabrot counts can be multiplied to get a number between 0 and
+// by which Buddhabrot counts can be multiplied to get a number between 0 and
 // 0xffff.
 static double GetLinearColorScale(void) {
   int x, y, index;
@@ -298,7 +296,7 @@ static double GetLinearColorScale(void) {
   return to_return;
 }
 
-// Returns the gamma-corrected 8-bit color channel value given a buddhabrot
+// Returns the gamma-corrected 8-bit color channel value given a Buddhabrot
 // iteration count c.
 static uint16_t DoGammaCorrection(uint64_t c, double linear_scale) {
   double max = 0xffff;
@@ -332,7 +330,7 @@ static void RenderImage(void) {
   int passes_count = 0;
   size_t data_size = g.dimensions.w * g.dimensions.h;
   double start_seconds;
-  printf("Calculating buddhabrot.\n");
+  printf("Calculating Buddhabrot.\n");
   if (g.seconds_to_run < 0) {
     printf("Press ctrl+C to finish.\n");
   } else {
@@ -356,7 +354,7 @@ static void RenderImage(void) {
   // grayscale values.
   CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
     data_size * sizeof(uint64_t), cudaMemcpyDeviceToHost));
-  printf("%d buddhabrot passes took %f seconds.\n", passes_count,
+  printf("%d Buddhabrot passes took %f seconds.\n", passes_count,
     CurrentSeconds() - start_seconds);
   SetGrayscalePixels();
 }
