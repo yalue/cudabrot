@@ -73,15 +73,9 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of memory.
    This option defaults to 1.0 (no gamma correction).
    Example images:
 
-    - `./cudabrot -r 200 -m 1000 -c 100 -t 10 -g 1.0`:<br />
-      ![No gamma correction](examples/gamma_1_0.png)
-
-    - `./cudabrot -r 200 -m 1000 -c 100 -t 10 -g 1.5`:<br />
-      ![1.5 Gamma](examples/gamma_1_5.png)
-
-    - `./cudabrot -r 200 -m 1000 -c 100 -t 10 -g 2.2`:<br />
-      ![2.2 Gamma](examples/gamma_2_2.png)
-
+    | `./cudabrot -r 150 -m 10000 -c 8000 -t 30 -g 1.0` | `./cudabrot -r 150 -m 10000 -c 8000 -t 30 -g 1.5` | `./cudabrot -r 150 -m 10000 -c 8000 -t 30 -g 2.2` |
+    | --- | --- | --- |
+    | ![No gamma correction](examples/gamma_1_0.png) | ![1.5 gamma](examples/gamma_1_5.png) | ![2.2 gamma](examples/gamma_2_2.png) |
 
  - `-m <max escape iterations>`: Example: `./cudabrot -m 10000`. This option
    specifies the maximum iterations to follow each particle before determining
