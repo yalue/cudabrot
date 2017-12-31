@@ -10,10 +10,10 @@
 #include <unistd.h>
 
 // Controls the number of threads per block to use.
-#define DEFAULT_BLOCK_SIZE (1024)
+#define DEFAULT_BLOCK_SIZE (256)
 
 // Controls the default number of blocks to use.
-#define DEFAULT_BLOCK_COUNT (16)
+#define DEFAULT_BLOCK_COUNT (32)
 
 // The name given to the output file if one isn't specified.
 #define DEFAULT_OUTPUT_NAME "output.pgm"
@@ -547,7 +547,7 @@ int main(int argc, char **argv) {
   g.block_count = DEFAULT_BLOCK_COUNT;
   g.seconds_to_run = 10;
   g.gamma_correction = 1.0;
-  SetResolution(4000, 4000);
+  SetResolution(1000, 1000);
   g.cuda_device = USE_DEFAULT_DEVICE;
   ParseArguments(argc, argv);
   if (g.seconds_to_run < 0) {
