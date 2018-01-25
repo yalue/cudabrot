@@ -91,7 +91,7 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of GPU RAM.
     | :---: | :---: | :---: |
     | ![Low max iterations](examples/max_100.png) | ![Mid max iterations](examples/max_1000.png) | ![High max iterations](examples/max_20000.png) |
 
- - `-c <min escape iterations`: Example: `./cudabrot -m 5000 -c 4000`. This
+ - `-c <min escape iterations>`: Example: `./cudabrot -m 5000 -c 4000`. This
    option specifies the minimum cutoff for the number of iterations for which
    points must *remain* in the Mandelbrot set if they are to be included in
    the Buddhabrot. Increasing the minimum cutoff iterations will therefore

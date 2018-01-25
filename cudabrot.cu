@@ -114,7 +114,7 @@ static double CurrentSeconds(void) {
 
 // Prints an error message and exits the program if the cudaError_t value is
 // not equal to cudaSuccess. Generally, this will be called via the
-// CheckCudaError macro.
+// CheckCUDAError macro.
 static void InternalCUDAErrorCheck(cudaError_t result, const char *fn,
     const char *file, int line) {
   if (result == cudaSuccess) return;
