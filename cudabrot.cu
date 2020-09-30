@@ -74,7 +74,7 @@ static struct {
   const char *output_image;
   // The number of seconds to run the calculation. If negative, wait for a
   // signal instead.
-  int seconds_to_run;
+  double seconds_to_run;
   // If this is nonzero, the program should save the image and quit as soon as
   // the current iteration finishes.
   int quit_signal_received;
@@ -334,7 +334,7 @@ static void RenderImage(void) {
   if (g.seconds_to_run < 0) {
     printf("Press ctrl+C to finish.\n");
   } else {
-    printf("Running for %d seconds.\n", g.seconds_to_run);
+    printf("Running for %.03f seconds.\n", g.seconds_to_run);
   }
 
   // Run until either the time elapsed or we've received a SIGINT.
@@ -427,8 +427,8 @@ static void PrintUsage(char *program_name) {
     "  -g <gamma correction>: A gamma-correction value to use on the\n"
     "     resulting image. If negative, no gamma correction will occur.\n"
     "  -t <seconds to run>: A number of seconds to run the calculation for.\n"
-    "     Defaults to 10. If negative, the program will run continuously and\n"
-    "     will terminate (saving the image) when it receives a SIGINT.\n"
+    "     Defaults to 10.0. If negative, the program will run continuously\n"
+    "     and will terminate (saving the image) when it receives a SIGINT.\n"
     "  -r <resolution>: Sets the number of pixels across one edge of the\n"
     "     square output image.\n");
   exit(0);
@@ -521,7 +521,7 @@ static void ParseArguments(int argc, char **argv) {
       continue;
     }
     if (strcmp(argv[i], "-t") == 0) {
-      g.seconds_to_run = ParseIntArg(argc, argv, i);
+      g.seconds_to_run = ParseDoubleArg(argc, argv, i);
       i++;
       continue;
     }
@@ -545,7 +545,7 @@ int main(int argc, char **argv) {
   g.iterations.samples_per_thread = SAMPLES_PER_THREAD;
   g.block_size = DEFAULT_BLOCK_SIZE;
   g.block_count = DEFAULT_BLOCK_COUNT;
-  g.seconds_to_run = 10;
+  g.seconds_to_run = 10.0;
   g.gamma_correction = 1.0;
   SetResolution(1000, 1000);
   g.cuda_device = USE_DEFAULT_DEVICE;
