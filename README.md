@@ -78,7 +78,7 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of GPU RAM.
  - `-h <image height>`: Example: `./cudabrot -w 500 -h 500`. This is like `-w`,
    except it controls vertical resolution rather than horizontal resolution.
 
- - `--min-real <minimum real value>`: Example: `./cudabrot -w 500 -h 250 --min-real 0.0 --max-real 1.0 --min-imag 0.0 --max-imag 0.5`.
+ - `--min-real <minimum real value>`: Example: `./cudabrot -w 200 -h 100 --min-real 0.0 --max-real 1.0 --min-imag 0.0 --max-imag 0.5`.
    This, along with `--max-real`, `--min-imag`, and `--max-imag` control the
    borders of the output-image "canvas" on the complex plane. The rectangle
    specified must be well-formed (e.g. `--min-real` must be less than
