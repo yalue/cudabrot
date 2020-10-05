@@ -84,12 +84,12 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of GPU RAM.
    specified must be well-formed (e.g. `--min-real` must be less than
    `--max-real`, etc.). If you want to set the canvas to something that isn't a
    square, then you'll also need manually adjust the output width and height to
-   match the aspect ratio. For example, the above example results in this
-   image: ![cropped example image](examples/cropped.png). Note that "zooming
-   in" will *not* necessarily speed up rendering, since points must still be
-   sampled from across the entire Mandelbrot-set domain (from -2.0 to 2.0, and
-   -2.0i to 2.0i).  However, these settings can still be used for saving memory
-   if you want to zoom in on finer details without rendering an
+   match the aspect ratio. For example, the above "example" command produces
+   this image: ![cropped example image](examples/cropped.png). Note that
+   "zooming in" will *not* necessarily speed up rendering, since points must
+   still be sampled from across the entire Mandelbrot-set domain (from -2.0 to
+   2.0, and -2.0i to 2.0i).  However, these settings can still be used for
+   saving memory if you want to zoom in on finer details without rendering an
    ultra-high-resolution image. `--min-real` defaults to -2.0.
 
  - `--max-real <maximum real value>`. See the note about `--min-real`.
