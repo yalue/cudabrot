@@ -1,4 +1,7 @@
 cudabrot
+# Keep changes in cudabrot.cu, rather than the generated cudabrot_hip.
+cudabrot_hip.cpp
 *.pgm
 *.jpg
 *.o
+

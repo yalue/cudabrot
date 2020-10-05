@@ -1,4 +1,4 @@
-.PHONY: all clean
+.PHONY: all clean hip
 
 CFLAGS := -Wall -Werror -O3 -g -fPIC
 
@@ -12,5 +12,14 @@ all: cudabrot
 cudabrot: cudabrot.cu
 	nvcc $(NVCCFLAGS) -o cudabrot cudabrot.cu -lm
 
+hip: cudabrot.cu
+	hipify-perl cudabrot.cu > cudabrot_hip.cpp
+	hipcc $(CFLAGS) \
+		-I/opt/rocm/hiprand/include \
+		-I/opt/rocm/rocrand/include \
+		-o cudabrot \
+		cudabrot_hip.cpp
+
 clean:
 	rm -f cudabrot
+

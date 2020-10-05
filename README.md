@@ -23,6 +23,7 @@ Usage
 
 To compile and run this program, you need to be using a Linux system with CUDA
 installed (the more recent the version, the better), and a CUDA-capable GPU.
+See below for instructions on AMD, using HIP.
 
 Compile the program simply by running `make`. Run it by running `./cudabrot`.
 A summary of command-line arguments can be obtained by running
@@ -30,6 +31,24 @@ A summary of command-line arguments can be obtained by running
 Typically, a colored Buddhabrot image is created by rendering several single-
 channel images with different parameters, then combining the results by
 assigning each single-channel image to a color in the output image.
+
+Compilation on AMD, using ROCm
+------------------------------
+
+This program has also been built and tested using ROCm 3.7 (but older versions
+probably work) on AMD GPUs. To use this, you'll need to have
+[installed ROCm](https://github.com/RadeonOpenCompute/ROCm), including `hip`,
+`rocRAND`, and `hipRAND` (these should be installed by default if you just
+follow the main ROCm installation instructions). Additionally, you'll need to
+ensure that `hipcc` and `hipify-perl` are on your `PATH`. The makefile also
+expects to be able to find `rocRAND` and `hipRAND` under `/opt/rocm/rocrand`
+and `/opt/rocm/hiprand`, respectively.
+
+If you satisfy all of the above requirements, then you should be able to
+compile the program by running `make hip`. This will produce a `cudabrot`
+binary that behaves the same way as the CUDA version. (Don't be intimidated by
+these instructions--check the makefile, it's actually very simple!)
+
 
 Examples and detailed description of options
 --------------------------------------------
