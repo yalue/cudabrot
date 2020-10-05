@@ -208,8 +208,17 @@ __device__ void IncrementPixelCounter(int row, int col, uint64_t *data,
   }
 }
 
-// This kernel takes a list of points which escape the Mandelbrot set, and, for
-// each iteration of the point, increments its location in the data array.
+// This kernel is responsible for drawing the paths of "particles" that escape
+// the mandelbrot set. It works as follows:
+//
+// 1. For each "sample", compute a new random starting point in the complex
+//    plane
+// 2. Do the normal mandelbrot iterations on the starting point, *without*
+//    recording its path
+// 3. If the point didn't escape the path, take a new sample (return to step 1)
+// 4. If the point escaped (within the min and max iteration limits), then
+//    repeat the mandelbrot iterations (e.g. step 2), except record its path
+//    by incrementing the pixel value for every point it passes through.
 __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
     IterationControl iterations, curandState_t *states) {
   int index = (blockIdx.x * blockDim.x) + threadIdx.x;
@@ -296,7 +305,7 @@ static double GetLinearColorScale(void) {
   return to_return;
 }
 
-// Returns the gamma-corrected 8-bit color channel value given a Buddhabrot
+// Returns the gamma-corrected 16-bit color channel value given a Buddhabrot
 // iteration count c.
 static uint16_t DoGammaCorrection(uint64_t c, double linear_scale) {
   double max = 0xffff;

@@ -1,5 +1,5 @@
-CUDAbrot: A "Buddhabrot" Renderer using CUDA
-============================================
+CUDAbrot: A "Buddhabrot" Renderer using CUDA or HIP
+===================================================
 
 About
 -----
