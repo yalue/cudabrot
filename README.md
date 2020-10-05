@@ -66,14 +66,39 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of GPU RAM.
    unspecified, the program will save the image to a file named `output.pgm` by
    default.
 
- - `-r <resolution>`: Example: `./cudabrot -r 10000`. The `-r` flag controls
-   the resolution of the output image. Since the Buddhabrot is always drawn on
-   a square canvas, this option specifies the number of pixels along a single
-   side of the square. Increasing the resolution won't slow down the program,
-   but it *will* increase the amount of GPU and CPU memory required. For
-   example, rendering a 20000x20000 image (`-r 20000`) takes at least 3 GB of
-   GPU memory, so higher resolutions may only be possible with more-capable
-   GPUs.
+ - `-w <image width>`: Example: `./cudabrot -w 500 -h 500`. This flag controls
+   the horizontal resolution of the output image, in pixels. Note that neither
+   this nor `-h` (for controlling vertical resolution) affects resolution at
+   which the complex plane is actually sampled. Image resolution doesn't
+   directly affect computation speed, but it *will* have an impact on GPU and
+   CPU memory required. For example, rendering a 20000x20000 image
+   (`-w 20000 -h 20000`) takes at least 3 GB of GPU memory, so higher
+   resolutions may only be possible on more-capable GPUs.
+
+ - `-h <image height>`: Example: `./cudabrot -w 500 -h 500`. This is like `-w`,
+   except it controls vertical resolution rather than horizontal resolution.
+
+ - `--min-real <minimum real value>`: Example: `./cudabrot -w 500 -h 250 --min-real 0.0 --max-real 1.0 --min-imag 0.0 --max-imag 0.5`.
+   This, along with `--max-real`, `--min-imag`, and `--max-imag` control the
+   borders of the output-image "canvas" on the complex plane. The rectangle
+   specified must be well-formed (e.g. `--min-real` must be less than
+   `--max-real`, etc.). If you want to set the canvas to something that isn't a
+   square, then you'll also need manually adjust the output width and height to
+   match the aspect ratio.  Note that "zooming in" will *not* necessarily speed
+   up rendering, since points must still be sampled from across the entire
+   Mandelbrot-set domain (from -2.0 to 2.0, and -2.0i to 2.0i).  However, these
+   settings can still be used for producing a "cropped" output image, or for
+   simply saving memory if you want to zoom in on finer details without
+   rendering an ultra-high-resolution image. `--min-real` defaults to -2.0.
+
+ - `--max-real <maximum real value>`. See the note about `--min-real`.
+   `--max-real` defaults to 2.0.
+
+ - `--min-imag <minimum imaginary value>`. See the note about `--min-real`.
+   `--min-imag` defaults to -2.0.
+
+ - `--max-imag <maximum imaginary value>`. See the note about `--min-real`.
+   `--max-imag` defaults to 2.0.
 
  - `-t <time to run (in seconds)>`: Example: `./cudabrot -t 60`. This option
    specifies the amount of time, in seconds, to run the rendering on the GPU.

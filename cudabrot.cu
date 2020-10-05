@@ -22,10 +22,6 @@
 // to cudaSuccess. (Calls the ErrorCheck function, defined later).
 #define CheckCUDAError(val) (InternalCUDAErrorCheck((val), #val, __FILE__, __LINE__))
 
-// This will be a magic value instructing the program to not explicitly set a
-// CUDA device.
-#define USE_DEFAULT_DEVICE (-1)
-
 // Increasing this may increase efficiency, but decrease responsiveness to
 // signals.
 #define SAMPLES_PER_THREAD (50)
@@ -135,9 +131,7 @@ __global__ void InitializeRNG(uint64_t seed, curandState_t *states) {
 // g.w and g.h have been set.
 static void SetupCUDA(void) {
   float gpu_memory_needed, cpu_memory_needed;
-  if (g.cuda_device != USE_DEFAULT_DEVICE) {
-    CheckCUDAError(cudaSetDevice(g.cuda_device));
-  }
+  CheckCUDAError(cudaSetDevice(g.cuda_device));
   size_t buffer_size = g.dimensions.w * g.dimensions.h;
   // The GPU will need space for the image and the RNG states.
   gpu_memory_needed = buffer_size * sizeof(uint64_t) +
@@ -198,13 +192,17 @@ __device__ int InOrder2Bulb(double real, double imag) {
 
 // This should be used to update the pixel data for a point that is encountered
 // in the set.
-__device__ void IncrementPixelCounter(int row, int col, uint64_t *data,
+__device__ void IncrementPixelCounter(double real, double imag, uint64_t *data,
     FractalDimensions *d) {
-  int r, c;
-  r = row;
-  c = col;
-  if ((r >= 0) && (r < d->h) && (c >= 0) && (c < d->h)) {
-    data[r * d->w + c] += 1;
+  int row, col;
+  // There's a small issue here with integer-dividing where values that should
+  // be immediately outside of the canvas can still appear on row or col 0, so
+  // just return early if we're outside the boundary.
+  if ((real < d->min_real) || (imag < d->min_imag)) return;
+  col = (real - d->min_real) / d->delta_real;
+  row = (imag - d->min_imag) / d->delta_imag;
+  if ((row >= 0) && (row < d->h) && (col >= 0) && (col < d->w)) {
+    data[(row * d->w) + col] += 1;
   }
 }
 
@@ -223,31 +221,34 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
     IterationControl iterations, curandState_t *states) {
   int index = (blockIdx.x * blockDim.x) + threadIdx.x;
   curandState_t *rng = states + index;
-  int i, j, skip_point, point_escaped, record_path, row, col;
+  int sample, i, skip_point, point_escaped, record_path;
   double start_real, start_imag, current_real, current_imag, tmp;
-  double real_range = dimensions.max_real - dimensions.min_real;
-  double imag_range = dimensions.max_imag - dimensions.min_imag;
   record_path = 0;
   point_escaped = 1;
-  for (i = 0; i < iterations.samples_per_thread; i++) {
+
+  // We're going to pick a number of random starting points configured by the
+  // iterations.samples_per_thread setting.
+  for (sample = 0; sample < iterations.samples_per_thread; sample++) {
     // Calculate a new starting point only if the previous point didn't escape.
     // Otherwise, we'll use the same starting point, and record the point's
     // path.
     if (!record_path) {
-      start_real = curand_uniform_double(rng) * real_range +
-        dimensions.min_real;
-      start_imag = curand_uniform_double(rng) * imag_range +
-        dimensions.min_imag;
+      // Sample across the entire domain of the set regardless of our "canvas"
+      start_real = (curand_uniform_double(rng) * 4.0) - 2.0;
+      start_imag = (curand_uniform_double(rng) * 4.0) - 2.0;
     }
     point_escaped = 0;
     current_real = start_real;
     current_imag = start_imag;
-    // Rather than nesting another if statement (which wouldn't help on the
-    // GPU anyway), set the skip_point flag if we know it'll remain in the set,
-    // and break out of the loop immediately if it does.
+
+    // Rather than nesting another if statement, set the skip_point flag if we
+    // know it'll remain in the set, and break out of the loop immediately if
+    // it does.
     skip_point = InMainCardioid(current_real, current_imag) || InOrder2Bulb(
       current_real, current_imag);
-    for (j = 0; j < iterations.max_escape_iterations; j++) {
+
+    // Now, do the normal "mandelbrot" iterations.
+    for (i = 0; i < iterations.max_escape_iterations; i++) {
       if (skip_point) {
         point_escaped = 0;
         break;
@@ -256,10 +257,8 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
         start_real;
       current_imag = 2 * current_real * current_imag + start_imag;
       current_real = tmp;
-      row = (current_imag - dimensions.min_imag) / dimensions.delta_imag;
-      col = (current_real - dimensions.min_real) / dimensions.delta_real;
       if (record_path) {
-        IncrementPixelCounter(row, col, data, &dimensions);
+        IncrementPixelCounter(current_real, current_imag, data, &dimensions);
       }
       // If the point escapes, stop iterating and indicate the loop ended due
       // to the point escaping.
@@ -269,11 +268,12 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
         break;
       }
     }
+
     // Record the next path if the point didn't escape and we weren't already
     // recording.
     if (point_escaped && !record_path) {
       // Enables ignoring paths that escape too quickly.
-      if (j > iterations.min_escape_iterations) record_path = 1;
+      if (i > iterations.min_escape_iterations) record_path = 1;
     } else {
       record_path = 0;
     }
@@ -368,22 +368,46 @@ static void RenderImage(void) {
   SetGrayscalePixels();
 }
 
-// Sets the resolution, scaling the complex boundaries to maintain an aspect
-// ratio.
-static void SetResolution(int width, int height) {
+// Recomputes the spacing between pixels in the image. Returns 0 if any image-
+// dimension setting is invalid. Otherwise, returns 1.
+static int RecomputePixelDeltas(void) {
   FractalDimensions *dims = &(g.dimensions);
-  double ratio = ((double) height) / ((double) width);
-  // The horizontal width for which the complex plane is shown.
-  double real_width = 4.0;
-  double imag_width = real_width * ratio;
-  dims->w = width;
-  dims->h = height;
-  dims->min_real = -(real_width / 2.0);
-  dims->max_real = dims->min_real + real_width;
-  dims->min_imag = -(imag_width / 2.0);
-  dims->max_imag = dims->min_imag + imag_width;
-  dims->delta_imag = imag_width / ((double) height);
-  dims->delta_real = real_width / ((double) width);
+  if (dims->w <= 0) {
+    printf("Output width must be positive.\n");
+    return 0;
+  }
+  if (dims->h <= 0) {
+    printf("Output height must be positive.\n");
+    return 0;
+  }
+  if (dims->max_real <= dims->min_real) {
+    printf("Maximum real value must be greater than minimum real value.\n");
+    return 0;
+  }
+  if (dims->max_imag <= dims->min_imag) {
+    printf("Minimum imaginary value must be greater than maximum imaginary "
+      "value.\n");
+    return 0;
+  }
+  dims->delta_imag = (dims->max_imag - dims->min_imag) / ((double) dims->h);
+  dims->delta_real = (dims->max_real - dims->min_real) / ((double) dims->w);
+  return 1;
+}
+
+// Sets the image boundaries and dimensions to their default values.
+static void SetDefaultCanvas(void) {
+  FractalDimensions *dims = &(g.dimensions);
+  memset(dims, 0, sizeof(*dims));
+  dims->w = 1000;
+  dims->h = 1000;
+  dims->min_real = -2.0;
+  dims->max_real = 2.0;
+  dims->min_imag = -2.0;
+  dims->max_imag = 2.0;
+  if (!RecomputePixelDeltas()) {
+    printf("Internal error setting default canvas boundaries!\n");
+    exit(1);
+  }
 }
 
 // If a filename has been set for saving the image, this will attempt to save
@@ -424,8 +448,7 @@ static void PrintUsage(char *program_name) {
   printf("Usage: %s [options]\n\n", program_name);
   printf("Options may be one or more of the following:\n"
     "  --help: Prints these instructions.\n"
-    "  -d <CUDA device number>: Can be used to set which GPU to use.\n"
-    "     Defaults to the default GPU.\n"
+    "  -d <device number>: Sets which GPU to use. Defaults to GPU 0.\n"
     "  -o <output file name>: If provided, the rendered image will be saved\n"
     "     to a bitmap file with the given name. Otherwise, saves the image\n"
     "     to " DEFAULT_OUTPUT_NAME ".\n"
@@ -438,13 +461,30 @@ static void PrintUsage(char *program_name) {
     "  -t <seconds to run>: A number of seconds to run the calculation for.\n"
     "     Defaults to 10.0. If negative, the program will run continuously\n"
     "     and will terminate (saving the image) when it receives a SIGINT.\n"
-    "  -r <resolution>: Sets the number of pixels across one edge of the\n"
-    "     square output image.\n");
+    "  -w <width>: The width of the output image, in pixels. Defaults to\n"
+    "     1000.\n"
+    "  -h <height>: The height of the output image, in pixels. Defaults to\n"
+    "     1000.\n"
+    "\n"
+    "The following settings control the location of the output image on the\n"
+    "complex plane, but samples are always drawn from the entire Mandelbrot-\n"
+    "set domain (-2-2i to 2+2i). So these settings can be used to save\n"
+    "memory or \"crop\" the output, but won't otherwise speed up rendering:\n"
+    "  --min-real <min real>: The minimum value along the real axis to\n"
+    "             include in the output image. Defaults to -2.0.\n"
+    "  --max-real <max real>: The maximum value along the real axis to\n"
+    "             include in the output image. Defaults to 2.0.\n"
+    "  --min-imag <min imag>: The minimum value along the imaginary axis to\n"
+    "             include in the output image. Defaults to -2.0.\n"
+    "  --max-imag <max imag>: The maximum value along the imaginary axis to\n"
+    "             include in the output image. Defaults to 2.0.\n"
+    "");
   exit(0);
 }
 
 // Returns an integer at the argument after index in argv. Exits if the integer
-// is invalid.
+// is invalid. Takes the index before the expected int value in order to print
+// better error messages.
 static int ParseIntArg(int argc, char **argv, int index) {
   char *tmp = NULL;
   int to_return = 0;
@@ -463,8 +503,7 @@ static int ParseIntArg(int argc, char **argv, int index) {
   return to_return;
 }
 
-// Returns a double at the argument after indexin argv. Exits if the double is
-// invalid.
+// Like ParseIntArg, except expects a floating-point double arg.
 static double ParseDoubleArg(int argc, char **argv, int index) {
   char *tmp = NULL;
   double to_return = 0.0;
@@ -484,7 +523,6 @@ static double ParseDoubleArg(int argc, char **argv, int index) {
 // Processes command-line arguments, setting values in the globals struct as
 // necessary.
 static void ParseArguments(int argc, char **argv) {
-  int new_resolution;
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--help") == 0) {
       PrintUsage(argv[0]);
@@ -518,9 +556,15 @@ static void ParseArguments(int argc, char **argv) {
       i++;
       continue;
     }
-    if (strcmp(argv[i], "-r") == 0) {
-      new_resolution = ParseIntArg(argc, argv, i);
-      SetResolution(new_resolution, new_resolution);
+    if (strcmp(argv[i], "-w") == 0) {
+      g.dimensions.w = ParseIntArg(argc, argv, i);
+      if (!RecomputePixelDeltas()) PrintUsage(argv[0]);
+      i++;
+      continue;
+    }
+    if (strcmp(argv[i], "-h") == 0) {
+      g.dimensions.h = ParseIntArg(argc, argv, i);
+      if (!RecomputePixelDeltas()) PrintUsage(argv[0]);
       i++;
       continue;
     }
@@ -531,6 +575,30 @@ static void ParseArguments(int argc, char **argv) {
     }
     if (strcmp(argv[i], "-t") == 0) {
       g.seconds_to_run = ParseDoubleArg(argc, argv, i);
+      i++;
+      continue;
+    }
+    if (strcmp(argv[i], "--min-real") == 0) {
+      g.dimensions.min_real = ParseDoubleArg(argc, argv, i);
+      if (!RecomputePixelDeltas()) PrintUsage(argv[0]);
+      i++;
+      continue;
+    }
+    if (strcmp(argv[i], "--max-real") == 0) {
+      g.dimensions.max_real = ParseDoubleArg(argc, argv, i);
+      if (!RecomputePixelDeltas()) PrintUsage(argv[0]);
+      i++;
+      continue;
+    }
+    if (strcmp(argv[i], "--min-imag") == 0) {
+      g.dimensions.min_imag = ParseDoubleArg(argc, argv, i);
+      if (!RecomputePixelDeltas()) PrintUsage(argv[0]);
+      i++;
+      continue;
+    }
+    if (strcmp(argv[i], "--max-imag") == 0) {
+      g.dimensions.max_imag = ParseDoubleArg(argc, argv, i);
+      if (!RecomputePixelDeltas()) PrintUsage(argv[0]);
       i++;
       continue;
     }
@@ -556,8 +624,8 @@ int main(int argc, char **argv) {
   g.block_count = DEFAULT_BLOCK_COUNT;
   g.seconds_to_run = 10.0;
   g.gamma_correction = 1.0;
-  SetResolution(1000, 1000);
-  g.cuda_device = USE_DEFAULT_DEVICE;
+  SetDefaultCanvas();
+  g.cuda_device = 0;
   ParseArguments(argc, argv);
   if (g.seconds_to_run < 0) {
     if (signal(SIGINT, SignalHandler) == SIG_ERR) {
@@ -574,7 +642,7 @@ int main(int argc, char **argv) {
   RenderImage();
   printf("Done! Saving image.\n");
   SaveImage();
-  printf("Output image saved.\n");
+  printf("Output image saved: %s\n", g.output_image);
   CleanupGlobals();
   return 0;
 }
