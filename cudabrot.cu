@@ -10,10 +10,10 @@
 #include <unistd.h>
 
 // Controls the number of threads per block to use.
-#define DEFAULT_BLOCK_SIZE (256)
+#define DEFAULT_BLOCK_SIZE (512)
 
 // Controls the default number of blocks to use.
-#define DEFAULT_BLOCK_COUNT (32)
+#define DEFAULT_BLOCK_COUNT (64)
 
 // The name given to the output file if one isn't specified.
 #define DEFAULT_OUTPUT_NAME "output.pgm"
@@ -28,7 +28,10 @@
 
 // If the number of max iterations exceeds this value, the samples per thread
 // will be reduced to 1 maintain responsiveness.
-#define SAMPLE_REDUCTION_THRESHOLD (40000)
+#define SAMPLE_REDUCTION_THRESHOLD (60000)
+
+// The RNG seed used when initializing the RNG states on the GPU.
+#define DEFAULT_RNG_SEED (1337)
 
 // Holds the boundaries and sizes of the fractal, in both pixels and numbers
 typedef struct {
@@ -160,7 +163,8 @@ static void SetupCUDA(void) {
   // Initialize the RNG state for the device.
   CheckCUDAError(cudaMalloc(&(g.rng_states), g.block_size * g.block_count *
     sizeof(curandState_t)));
-  InitializeRNG<<<g.block_size, g.block_count>>>(1337, g.rng_states);
+  InitializeRNG<<<g.block_size, g.block_count>>>(DEFAULT_RNG_SEED,
+    g.rng_states);
   CheckCUDAError(cudaDeviceSynchronize());
 
   g.grayscale_image = (uint16_t *) malloc(buffer_size * sizeof(uint16_t));
@@ -627,12 +631,10 @@ int main(int argc, char **argv) {
   SetDefaultCanvas();
   g.cuda_device = 0;
   ParseArguments(argc, argv);
-  if (g.seconds_to_run < 0) {
-    if (signal(SIGINT, SignalHandler) == SIG_ERR) {
-      printf("Failed setting signal handler.\n");
-      CleanupGlobals();
-      return 1;
-    }
+  if (signal(SIGINT, SignalHandler) == SIG_ERR) {
+    printf("Failed setting signal handler.\n");
+    CleanupGlobals();
+    return 1;
   }
   printf("Creating %dx%d image, %d samples per thread, %d max iterations.\n",
     g.dimensions.w, g.dimensions.h, g.iterations.samples_per_thread,
