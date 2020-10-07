@@ -210,6 +210,34 @@ __device__ void IncrementPixelCounter(double real, double imag, uint64_t *data,
   }
 }
 
+// Does the Mandelbrot-set iterations for the given (real, imag) point. If
+// record_path is nonzero, the path of the pixel will be recorded in the *data
+// array. Returns the number of iterations before the point escapes, or
+// max_iterations if the point never escapes.
+__device__ int IterateMandelbrot(double real, double imag, uint64_t *data,
+    FractalDimensions *d, int max_iterations, int record_path) {
+  double tmp, current_real, current_imag;
+  int i;
+  current_real = real;
+  current_imag = imag;
+  for (i = 0; i < max_iterations; i++) {
+    tmp = (current_real * current_real) - (current_imag * current_imag) + real;
+    current_imag = 2 * current_real * current_imag + imag;
+    current_real = tmp;
+    // Record the point's current location if we're supposed to.
+    if (record_path) {
+      IncrementPixelCounter(current_real, current_imag, data, d);
+    }
+    // If the point escapes, stop iterating and indicate the loop ended due
+    // to the point escaping.
+    if (((current_real * current_real) + (current_imag * current_imag)) > 4) {
+      return i;
+    }
+  }
+  // The point didn't escape, return max_iterations.
+  return max_iterations;
+}
+
 // This kernel is responsible for drawing the paths of "particles" that escape
 // the mandelbrot set. It works as follows:
 //
@@ -225,62 +253,35 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
     IterationControl iterations, curandState_t *states) {
   int index = (blockIdx.x * blockDim.x) + threadIdx.x;
   curandState_t *rng = states + index;
-  int sample, i, skip_point, point_escaped, record_path;
-  double start_real, start_imag, current_real, current_imag, tmp;
-  record_path = 0;
-  point_escaped = 1;
+  int sample, iterations_needed, max_iterations, min_iterations;
+  double real, imag;
+  max_iterations = iterations.max_escape_iterations;
+  min_iterations = iterations.min_escape_iterations;
 
   // We're going to pick a number of random starting points configured by the
   // iterations.samples_per_thread setting.
   for (sample = 0; sample < iterations.samples_per_thread; sample++) {
-    // Calculate a new starting point only if the previous point didn't escape.
-    // Otherwise, we'll use the same starting point, and record the point's
-    // path.
-    if (!record_path) {
-      // Sample across the entire domain of the set regardless of our "canvas"
-      start_real = (curand_uniform_double(rng) * 4.0) - 2.0;
-      start_imag = (curand_uniform_double(rng) * 4.0) - 2.0;
-    }
-    point_escaped = 0;
-    current_real = start_real;
-    current_imag = start_imag;
+    // Sample across the entire domain of the set regardless of our "canvas"
+    real = (curand_uniform_double(rng) * 4.0) - 2.0;
+    imag = (curand_uniform_double(rng) * 4.0) - 2.0;
 
-    // Rather than nesting another if statement, set the skip_point flag if we
-    // know it'll remain in the set, and break out of the loop immediately if
-    // it does.
-    skip_point = InMainCardioid(current_real, current_imag) || InOrder2Bulb(
-      current_real, current_imag);
+    // Optimization: we know ahead of time that points from the main cardioid
+    // and the largest "bulb" will never escape, and it's fast to check them.
+    if (InMainCardioid(real, imag) || InOrder2Bulb(real, imag)) continue;
 
-    // Now, do the normal "mandelbrot" iterations.
-    for (i = 0; i < iterations.max_escape_iterations; i++) {
-      if (skip_point) {
-        point_escaped = 0;
-        break;
-      }
-      tmp = (current_real * current_real) - (current_imag * current_imag) +
-        start_real;
-      current_imag = 2 * current_real * current_imag + start_imag;
-      current_real = tmp;
-      if (record_path) {
-        IncrementPixelCounter(current_real, current_imag, data, &dimensions);
-      }
-      // If the point escapes, stop iterating and indicate the loop ended due
-      // to the point escaping.
-      if (((current_real * current_real) + (current_imag * current_imag)) >
-        4) {
-        point_escaped = 1;
-        break;
-      }
-    }
+    // Now, do the normal Mandelbrot iterations to see how quickly the point
+    // escapes (if it does). However, we won't record the path yet.
+    iterations_needed = IterateMandelbrot(real, imag, data, &dimensions,
+      max_iterations, 0);
 
-    // Record the next path if the point didn't escape and we weren't already
-    // recording.
-    if (point_escaped && !record_path) {
-      // Enables ignoring paths that escape too quickly.
-      if (i > iterations.min_escape_iterations) record_path = 1;
-    } else {
-      record_path = 0;
-    }
+    // Don't record the path if the point never escaped, or if it escaped too
+    // quickly.
+    if (iterations_needed >= max_iterations) continue;
+    if (iterations_needed < min_iterations) continue;
+
+    // At this point, do the Mandelbrot iterations, but actually record the
+    // path because we know the point is "good".
+    IterateMandelbrot(real, imag, data, &dimensions, max_iterations, 1);
   }
 }
 
