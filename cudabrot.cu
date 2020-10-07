@@ -13,7 +13,7 @@
 #define DEFAULT_BLOCK_SIZE (512)
 
 // Controls the default number of blocks to use.
-#define DEFAULT_BLOCK_COUNT (64)
+#define DEFAULT_BLOCK_COUNT (512)
 
 // The name given to the output file if one isn't specified.
 #define DEFAULT_OUTPUT_NAME "output.pgm"
@@ -25,10 +25,6 @@
 // Increasing this may increase efficiency, but decrease responsiveness to
 // signals.
 #define SAMPLES_PER_THREAD (50)
-
-// If the number of max iterations exceeds this value, the samples per thread
-// will be reduced to 1 maintain responsiveness.
-#define SAMPLE_REDUCTION_THRESHOLD (60000)
 
 // The RNG seed used when initializing the RNG states on the GPU.
 #define DEFAULT_RNG_SEED (1337)
@@ -51,8 +47,6 @@ typedef struct {
 // This struct holds the parameters for different types of "iterations" needed
 // when calculating the Buddhabrot.
 typedef struct {
-  // Each CUDA thread in every block will sample this many random points.
-  int samples_per_thread;
   // This is the maximum number of iterations to run to see if a point escapes.
   int max_escape_iterations;
   // If a point escapes in fewer than this many iterations, it will be ignored.
@@ -71,8 +65,8 @@ static struct {
   // The filename to which a bitmap image will be saved, or NULL if an image
   // should not be saved.
   const char *output_image;
-  // The number of seconds to run the calculation. If negative, wait for a
-  // signal instead.
+  // The number of seconds to run the calculation. If negative, run
+  // indefinitely until a signal is received.
   double seconds_to_run;
   // If this is nonzero, the program should save the image and quit as soon as
   // the current iteration finishes.
@@ -94,10 +88,10 @@ static struct {
 // If any globals have been initialized, this will free them. (Relies on
 // globals being set to 0 at the start of the program)
 static void CleanupGlobals(void) {
-  if (g.rng_states) cudaFree(g.rng_states);
-  if (g.device_buddhabrot) cudaFree(g.device_buddhabrot);
-  if (g.rng_states) cudaFree(g.rng_states);
-  if (g.grayscale_image) free(g.grayscale_image);
+  cudaFree(g.rng_states);
+  cudaFree(g.device_buddhabrot);
+  cudaFree(g.rng_states);
+  free(g.grayscale_image);
   memset(&g, 0, sizeof(g));
 }
 
@@ -279,9 +273,9 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
   max_iterations = iterations.max_escape_iterations;
   min_iterations = iterations.min_escape_iterations;
 
-  // We're going to pick a number of random starting points configured by the
-  // iterations.samples_per_thread setting.
-  for (sample = 0; sample < iterations.samples_per_thread; sample++) {
+  // We're going to pick a number of random starting points determined by the
+  // SAMPLES_PER_THREAD value.
+  for (sample = 0; sample < SAMPLES_PER_THREAD; sample++) {
     // Sample across the entire domain of the set regardless of our "canvas"
     real = (curand_uniform_double(rng) * 4.0) - 2.0;
     imag = (curand_uniform_double(rng) * 4.0) - 2.0;
@@ -296,7 +290,7 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
 
     // Don't record the path if the point never escaped, or if it escaped too
     // quickly.
-    if (iterations_needed >= max_iterations) continue;
+    if (iterations_needed >= max_iterations)  continue;
     if (iterations_needed < min_iterations) continue;
 
     // At this point, do the Mandelbrot iterations, but actually record the
@@ -568,10 +562,9 @@ static void ParseArguments(int argc, char **argv) {
     }
     if (strcmp(argv[i], "-m") == 0) {
       g.iterations.max_escape_iterations = ParseIntArg(argc, argv, i);
-      if (g.iterations.max_escape_iterations > SAMPLE_REDUCTION_THRESHOLD) {
-        // Maintain responsiveness with a huge number of iterations by reducing
-        // the samples per thread.
-        g.iterations.samples_per_thread = 1;
+      if (g.iterations.max_escape_iterations > 60000) {
+        printf("Warning: Using a high number of iterations may cause the "
+          "program respond slowly to Ctrl+C or time running out.\n");
       }
       i++;
       continue;
@@ -644,7 +637,6 @@ int main(int argc, char **argv) {
   g.output_image = DEFAULT_OUTPUT_NAME;
   g.iterations.max_escape_iterations = 100;
   g.iterations.min_escape_iterations = 20;
-  g.iterations.samples_per_thread = SAMPLES_PER_THREAD;
   g.block_size = DEFAULT_BLOCK_SIZE;
   g.block_count = DEFAULT_BLOCK_COUNT;
   g.seconds_to_run = 10.0;
@@ -657,9 +649,8 @@ int main(int argc, char **argv) {
     CleanupGlobals();
     return 1;
   }
-  printf("Creating %dx%d image, %d samples per thread, %d max iterations.\n",
-    g.dimensions.w, g.dimensions.h, g.iterations.samples_per_thread,
-    g.iterations.max_escape_iterations);
+  printf("Creating %dx%d image, %d max iterations.\n",
+    g.dimensions.w, g.dimensions.h, g.iterations.max_escape_iterations);
   printf("Calculating image...\n");
   SetupCUDA();
   RenderImage();
