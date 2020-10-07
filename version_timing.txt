@@ -57,3 +57,17 @@ Max value: 104509, scale: 0.627075
 Done! Saving image.
 Output image saved: output.pgm
 
+
+Performance at commit 58fbe99907105142497322425ea8c73241d0b500:
+(This is the version after increasing the block count to 512.)
+
+Creating 1000x1000 image, 100 max iterations.
+Calculating image...
+Approximate memory needed: 19.629 MiB GPU, 9.537 MiB CPU
+Calculating Buddhabrot.
+Running for 10.000 seconds.
+812 Buddhabrot passes took 10.010447 seconds.
+Max value: 227153, scale: 0.288506
+Done! Saving image.
+Output image saved: output.pgm
+
