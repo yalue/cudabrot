@@ -219,6 +219,11 @@ inline __device__ int IterateMandelbrot(double start_real, double start_imag,
   int i;
   real = start_real;
   imag = start_imag;
+
+  // This loop-unrolling was tested on a Radeon VII, anything higher or lower
+  // than 4 produced worse performance. May differ on other devices, or future
+  // compiler updates.
+#pragma unroll 4
   for (i = 0; i < max_iterations; i++) {
     tmp = (real * real) - (imag * imag) + start_real;
     imag = 2 * real * imag + start_imag;
@@ -241,6 +246,7 @@ inline __device__ void IterateAndRecord(double start_real, double start_imag,
   double tmp, real, imag;
   real = start_real;
   imag = start_imag;
+#pragma unroll 4
   while (1) {
     tmp = (real * real) - (imag * imag) + start_real;
     imag = 2 * real * imag + start_imag;
