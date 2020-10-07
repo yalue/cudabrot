@@ -178,7 +178,7 @@ static void SetupCUDA(void) {
 
 // This returns nonzero if the given point is in the main cardioid of the set
 // and is therefore guaranteed to not escape.
-__device__ int InMainCardioid(double real, double imag) {
+inline __device__ int InMainCardioid(double real, double imag) {
   // This algorithm was taken from the Wikipedia Mandelbrot set page.
   double imag_squared = imag * imag;
   double q = (real - 0.25);
@@ -188,7 +188,7 @@ __device__ int InMainCardioid(double real, double imag) {
 
 // This returns nonzero if the given point is in the order 2 bulb of the set
 // and therefore guaranteed to not escape.
-__device__ int InOrder2Bulb(double real, double imag) {
+inline __device__ int InOrder2Bulb(double real, double imag) {
   double tmp = real + 1;
   tmp = tmp * tmp;
   return (tmp + (imag * imag)) < (1.0 / 16.0);
@@ -196,8 +196,8 @@ __device__ int InOrder2Bulb(double real, double imag) {
 
 // This should be used to update the pixel data for a point that is encountered
 // in the set.
-__device__ void IncrementPixelCounter(double real, double imag, uint64_t *data,
-    FractalDimensions *d) {
+inline __device__ void IncrementPixelCounter(double real, double imag,
+    uint64_t *data, FractalDimensions *d) {
   int row, col;
   // There's a small issue here with integer-dividing where values that should
   // be immediately outside of the canvas can still appear on row or col 0, so
@@ -210,33 +210,48 @@ __device__ void IncrementPixelCounter(double real, double imag, uint64_t *data,
   }
 }
 
-// Does the Mandelbrot-set iterations for the given (real, imag) point. If
-// record_path is nonzero, the path of the pixel will be recorded in the *data
-// array. Returns the number of iterations before the point escapes, or
-// max_iterations if the point never escapes.
-__device__ int IterateMandelbrot(double real, double imag, uint64_t *data,
-    FractalDimensions *d, int max_iterations, int record_path) {
-  double tmp, current_real, current_imag;
+// Does the Mandelbrot-set iterations for the given (real, imag) point. Returns
+// the number of iterations before the point escapes, or max_iterations if the
+// point never escapes.
+inline __device__ int IterateMandelbrot(double start_real, double start_imag,
+    int max_iterations) {
+  double tmp, real, imag;
   int i;
-  current_real = real;
-  current_imag = imag;
+  real = start_real;
+  imag = start_imag;
   for (i = 0; i < max_iterations; i++) {
-    tmp = (current_real * current_real) - (current_imag * current_imag) + real;
-    current_imag = 2 * current_real * current_imag + imag;
-    current_real = tmp;
-    // Record the point's current location if we're supposed to.
-    if (record_path) {
-      IncrementPixelCounter(current_real, current_imag, data, d);
-    }
+    tmp = (real * real) - (imag * imag) + start_real;
+    imag = 2 * real * imag + start_imag;
+    real = tmp;
     // If the point escapes, stop iterating and indicate the loop ended due
     // to the point escaping.
-    if (((current_real * current_real) + (current_imag * current_imag)) > 4) {
-      return i;
-    }
+    if (((real * real) + (imag * imag)) > 4) return i;
   }
   // The point didn't escape, return max_iterations.
   return max_iterations;
 }
+
+// Like IterateMandelbrot, but records the point's path. For efficiency, this
+// function also has an important difference from IterateMandelbrot: *it does
+// not check the max iterations*. This is important! Do not call this function
+// for a point unless you're sure that it escapes in a finite number of
+// iterations.
+inline __device__ void IterateAndRecord(double start_real, double start_imag,
+    uint64_t *data, FractalDimensions *d) {
+  double tmp, real, imag;
+  real = start_real;
+  imag = start_imag;
+  while (1) {
+    tmp = (real * real) - (imag * imag) + start_real;
+    imag = 2 * real * imag + start_imag;
+    real = tmp;
+    IncrementPixelCounter(real, imag, data, d);
+    // Stop iterating when the point escapes. This must be *guaranteed* to
+    // happen by the caller performing a prior check!
+    if (((real * real) + (imag * imag)) > 4) break;
+  }
+}
+
 
 // This kernel is responsible for drawing the paths of "particles" that escape
 // the mandelbrot set. It works as follows:
@@ -271,8 +286,7 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
 
     // Now, do the normal Mandelbrot iterations to see how quickly the point
     // escapes (if it does). However, we won't record the path yet.
-    iterations_needed = IterateMandelbrot(real, imag, data, &dimensions,
-      max_iterations, 0);
+    iterations_needed = IterateMandelbrot(real, imag, max_iterations);
 
     // Don't record the path if the point never escaped, or if it escaped too
     // quickly.
@@ -281,7 +295,7 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
 
     // At this point, do the Mandelbrot iterations, but actually record the
     // path because we know the point is "good".
-    IterateMandelbrot(real, imag, data, &dimensions, max_iterations, 1);
+    IterateAndRecord(real, imag, data, &dimensions);
   }
 }
 
