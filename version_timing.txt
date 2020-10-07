@@ -1,0 +1,43 @@
+Here are some basic performance numbers, when running the program with no
+arguments on a Radeon VII GPU:
+
+Performance at commit a112cb108b2a9eb3ef8f64138c93b7696262079b:
+(This is the version with the "old" complicated kernel.)
+
+Creating 1000x1000 image, 50 samples per thread, 100 max iterations.
+Calculating image...
+Approximate memory needed: 9.129 MiB GPU, 9.537 MiB CPU
+Calculating Buddhabrot.
+Running for 10.000 seconds.
+3007 Buddhabrot passes took 10.003783 seconds.
+Max value: 102438, scale: 0.639753
+Done! Saving image.
+Output image saved: output.pgm
+
+
+Performance at commit 5d15d53696d30bc984b87ff3860c9af1eacb041e:
+(This is the version with the "new" simplified kernel.)
+
+Creating 1000x1000 image, 50 samples per thread, 100 max iterations.
+Calculating image...
+Approximate memory needed: 9.129 MiB GPU, 9.537 MiB CPU
+Calculating Buddhabrot.
+Running for 10.000 seconds.
+2877 Buddhabrot passes took 10.004008 seconds.
+Max value: 100974, scale: 0.649028
+Done! Saving image.
+Output image saved: output.pgm
+
+Performance at commit b95671388df259cc7f4c7514e9e907d2f88cb8a6:
+(This is the version with inlined functions and small optimizations.)
+
+Creating 1000x1000 image, 50 samples per thread, 100 max iterations.
+Calculating image...
+Approximate memory needed: 9.129 MiB GPU, 9.537 MiB CPU
+Calculating Buddhabrot.
+Running for 10.000 seconds.
+2904 Buddhabrot passes took 10.003585 seconds.
+Max value: 101955, scale: 0.642784
+Done! Saving image.
+Output image saved: output.pgm
+
