@@ -1,5 +1,6 @@
 Here are some basic performance numbers, when running the program with no
-arguments on a Radeon VII GPU:
+arguments on a Radeon VII GPU.  The most-recent measurements are at the bottom
+of this file.
 
 Performance at commit a112cb108b2a9eb3ef8f64138c93b7696262079b:
 (This is the version with the "old" complicated kernel.)
@@ -28,6 +29,7 @@ Max value: 100974, scale: 0.649028
 Done! Saving image.
 Output image saved: output.pgm
 
+
 Performance at commit b95671388df259cc7f4c7514e9e907d2f88cb8a6:
 (This is the version with inlined functions and small optimizations.)
 
@@ -38,6 +40,20 @@ Calculating Buddhabrot.
 Running for 10.000 seconds.
 2904 Buddhabrot passes took 10.003585 seconds.
 Max value: 101955, scale: 0.642784
+Done! Saving image.
+Output image saved: output.pgm
+
+Performance at commit f407a418cca13dd59c518d2193d9f38098016693:
+(This is the version where "#pragma unroll 4" was added to the Mandelbrot-set
+loops.)
+
+Creating 1000x1000 image, 50 samples per thread, 100 max iterations.
+Calculating image...
+Approximate memory needed: 9.129 MiB GPU, 9.537 MiB CPU
+Calculating Buddhabrot.
+Running for 10.000 seconds.
+2976 Buddhabrot passes took 10.004047 seconds.
+Max value: 104509, scale: 0.627075
 Done! Saving image.
 Output image saved: output.pgm
 
