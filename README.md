@@ -148,6 +148,7 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of GPU RAM.
     | :---: | :---: | :---: |
     | ![Low cutoff](examples/cutoff_20.png) | ![Mid cutoff](examples/cutoff_2000.png) | ![High cutoff](examples/cutoff_10000.png) |
 
+
 Coloring the Buddhabrot
 -----------------------
 
@@ -175,5 +176,12 @@ tool linked above:
     color_output.jpg
 ```
 
-The above commands result in this colored image:
-![color Buddhabrot](examples/color_output.jpg)
+Alternatively, I've found that mapping grayscale images to H, S, and L
+components of an HSL-color image results in a wide range of colors. I've
+included a script, `generate_hires_color_image.sh`, that uses this program to
+generate a nice looking, high-resolution (20k x 15x pixels) result. See the
+comments in the script for notes about additional requirements and operation.
+The following image is a cropped portion of the full-resolution output:
+
+![Cropped HSL-script output](examples/hsl_render.jpg)
+
