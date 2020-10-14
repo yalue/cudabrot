@@ -78,6 +78,14 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of GPU RAM.
  - `-h <image height>`: Example: `./cudabrot -w 500 -h 500`. This is like `-w`,
    except it controls vertical resolution rather than horizontal resolution.
 
+ - `-s <save/load file>`: If provided, this must be the name of a file into
+   which the rendering buffer will be saved, for future continuation. If the
+   file already exists when the program starts, it will be loaded (and then
+   updated again before the program exits). This can be helpful if you need to
+   "pause" long-running renders and resume them later. If already present, the
+   file's size must match the expected internal size of the image buffer, but
+   otherwise the file has no specified format.
+
  - `--min-real <minimum real value>`: Example: `./cudabrot -w 200 -h 100 --min-real 0.0 --max-real 1.0 --min-imag 0.0 --max-imag 0.5`.
    This, along with `--max-real`, `--min-imag`, and `--max-imag` control the
    borders of the output-image "canvas" on the complex plane. The rectangle

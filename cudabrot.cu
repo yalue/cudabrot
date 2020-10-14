@@ -1,6 +1,4 @@
-#include <cuda_runtime.h>
-#include <curand.h>
-#include <curand_kernel.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -8,6 +6,11 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <cuda_runtime.h>
+#include <curand.h>
+#include <curand_kernel.h>
+
 
 // Controls the number of threads per block to use.
 #define DEFAULT_BLOCK_SIZE (512)
@@ -80,9 +83,6 @@ static struct {
   // If this is nonzero, the program should save the image and quit as soon as
   // the current iteration finishes.
   int quit_signal_received;
-  // If this is nonzero, it indicates that the program finished due to the time
-  // running out. This will never be set to 1 if seconds_to_run is negative.
-  int done_rendering;
   // Holds various iteration-related settings.
   IterationControl iterations;
   // The size and location of the fractal and output image.
@@ -97,6 +97,13 @@ static struct {
   uint16_t *grayscale_image;
 } g;
 
+// Returns the size, in bytes, of the internal image buffer used to hold the
+// pixel data.
+static uint64_t GetImageBufferSize(void) {
+  return ((uint64_t) g.dimensions.w) * ((uint64_t) g.dimensions.h) *
+    sizeof(Pixel);
+}
+
 // If any globals have been initialized, this will free them. (Relies on
 // globals being set to 0 at the start of the program)
 static void CleanupGlobals(void) {
@@ -104,6 +111,7 @@ static void CleanupGlobals(void) {
   cudaFree(g.device_buddhabrot);
   cudaFree(g.rng_states);
   free(g.grayscale_image);
+  free(g.host_buddhabrot);
   memset(&g, 0, sizeof(g));
 }
 
@@ -123,7 +131,8 @@ static double CurrentSeconds(void) {
 static void InternalCUDAErrorCheck(cudaError_t result, const char *fn,
     const char *file, int line) {
   if (result == cudaSuccess) return;
-  printf("CUDA error %d in %s, line %d (%s)\n", (int) result, file, line, fn);
+  printf("CUDA error %d (%s) in %s, line %d (%s)\n", (int) result,
+    cudaGetErrorString(result), file, line, fn);
   CleanupGlobals();
   exit(1);
 }
@@ -141,30 +150,25 @@ __global__ void InitializeRNG(uint64_t seed, curandState_t *states) {
 static void SetupCUDA(void) {
   float gpu_memory_needed, cpu_memory_needed;
   CheckCUDAError(cudaSetDevice(g.cuda_device));
-  size_t buffer_size = g.dimensions.w * g.dimensions.h;
+  size_t pixel_count = g.dimensions.w * g.dimensions.h;
   // The GPU will need space for the image and the RNG states.
-  gpu_memory_needed = buffer_size * sizeof(Pixel) +
+  gpu_memory_needed = GetImageBufferSize() +
     (g.block_size * g.block_count * sizeof(curandState_t));
   gpu_memory_needed /= (1024.0 * 1024.0);
   // The CPU needs space for the image and grayscale conversion.
-  cpu_memory_needed = buffer_size * sizeof(Pixel) +
-    buffer_size * sizeof(uint16_t);
+  cpu_memory_needed = GetImageBufferSize() + (pixel_count * sizeof(uint16_t));
   cpu_memory_needed /= (1024.0 * 1024.0);
   printf("Approximate memory needed: %.03f MiB GPU, %.03f MiB CPU\n",
     gpu_memory_needed, cpu_memory_needed);
 
   // Initialize the host and device image buffers.
-  CheckCUDAError(cudaMalloc(&(g.device_buddhabrot), buffer_size *
-    sizeof(Pixel)));
-  CheckCUDAError(cudaMemset(g.device_buddhabrot, 0, buffer_size *
-    sizeof(Pixel)));
-  g.host_buddhabrot = (Pixel *) malloc(buffer_size * sizeof(Pixel));
+  CheckCUDAError(cudaMalloc(&(g.device_buddhabrot), GetImageBufferSize()));
+  CheckCUDAError(cudaMemset(g.device_buddhabrot, 0, GetImageBufferSize()));
+  g.host_buddhabrot = (Pixel *) calloc(1, GetImageBufferSize());
   if (!g.host_buddhabrot) {
-    printf("Failed allocating host Buddhabrot buffer.\n");
     CleanupGlobals();
     exit(1);
   }
-  memset(g.host_buddhabrot, 0, buffer_size * sizeof(Pixel));
 
   // Initialize the RNG state for the device.
   CheckCUDAError(cudaMalloc(&(g.rng_states), g.block_size * g.block_count *
@@ -173,28 +177,104 @@ static void SetupCUDA(void) {
     g.rng_states);
   CheckCUDAError(cudaDeviceSynchronize());
 
-  g.grayscale_image = (uint16_t *) malloc(buffer_size * sizeof(uint16_t));
+  g.grayscale_image = (uint16_t *) calloc(pixel_count, sizeof(uint16_t));
   if (!g.grayscale_image) {
     printf("Failed allocating grayscale image.\n");
     CleanupGlobals();
     exit(1);
   }
-  memset(g.grayscale_image, 0, buffer_size * sizeof(uint16_t));
+}
+
+// Returns the size, in bytes, of f. Exits on error.
+static uint64_t GetFileSize(FILE *f) {
+  int64_t to_return;
+  if (fseek(f, 0, SEEK_END) != 0) {
+    printf("Failed seeking file end: %s\n", strerror(errno));
+    CleanupGlobals();
+    exit(1);
+  }
+  to_return = ftell(f);
+  if (to_return < 0) {
+    printf("Failed reading file size: %s\n", strerror(errno));
+    CleanupGlobals();
+    exit(1);
+  }
+  if (fseek(f, 0, SEEK_SET) != 0) {
+    printf("Failed seeking file start: %s\n", strerror(errno));
+    CleanupGlobals();
+    exit(1);
+  }
+  return to_return;
 }
 
 // Loads the in-progress buffer from a file, if the file exists. Exits if an
-// error occurs (such as the file not existing, or not being the right size. If
-// the buffer was loaded successfully, this deletes the file.
+// error occurs.  Creates the file if it doesn't exist.
 static void LoadInProgressBuffer(void) {
-  // TODO (next): Implement LoadInProgressBuffer.
+  uint64_t expected_size, file_size;
+  FILE *f = NULL;
+  if (!g.inprogress_file) return;
+
+  // We won't consider it an error if the file doesn't exist, and won't try to
+  // load its contents.
+  f = fopen(g.inprogress_file, "rb");
+  expected_size = GetImageBufferSize();
+  printf("Loading previous image state from %s.\n",
+    g.inprogress_file);
+  if (!f) {
+    if (errno == ENOENT) {
+      printf("File %s doesn't exist yet. Not loading.\n",
+        g.inprogress_file);
+      return;
+    }
+    printf("Failed opening %s: %s\n", g.inprogress_file, strerror(errno));
+    CleanupGlobals();
+    exit(1);
+  }
+  file_size = GetFileSize(f);
+
+  // Ensure the file matches the expected size of our image buffer.
+  if (file_size != expected_size) {
+    printf("The size of %s doesn't match the expected size of %lu bytes.\n",
+      g.inprogress_file, (unsigned long) expected_size);
+    fclose(f);
+    CleanupGlobals();
+    exit(1);
+  }
+
+  // Read the file to the local buffer, then update the device copy.
+  if (fread(g.host_buddhabrot, expected_size, 1, f) != 1) {
+    printf("Failed reading %s: %s\n", g.inprogress_file, strerror(errno));
+    fclose(f);
+    CleanupGlobals();
+    exit(1);
+  }
+  fclose(f);
+  f = NULL;
+  CheckCUDAError(cudaMemcpy(g.device_buddhabrot, g.host_buddhabrot,
+    expected_size, cudaMemcpyHostToDevice));
 }
 
 // Saves the in-progress buffer to a file, if the filename was specified.
-// Returns an error if one occurs. Does nothing if g.done_rendering is true, or
-// if the filename isn't specified.
+// Exits if an error occurs.
 static void SaveInProgressBuffer(void) {
-  if (g.done_rendering || !g.inprogress_file) return;
-  // TODO: Implement SaveInProgressBuffer.
+  FILE *f = NULL;
+  if (!g.inprogress_file) return;
+  printf("Saving in-progress buffer to %s.\n", g.inprogress_file);
+  f = fopen(g.inprogress_file, "wb");
+  if (!f) {
+    printf("Failed opening %s: %s\n", g.inprogress_file, strerror(errno));
+    CleanupGlobals();
+    exit(1);
+  }
+  if (fwrite(g.host_buddhabrot, GetImageBufferSize(), 1, f) != 1) {
+    printf("Failed writing data to %s: %s\n", g.inprogress_file,
+      strerror(errno));
+    fclose(f);
+    CleanupGlobals();
+    exit(1);
+  }
+  fclose(f);
+  // TODO (next): Test saving and loading
 }
 
 // This returns nonzero if the given point is in the main cardioid of the set
@@ -383,7 +463,6 @@ static void SetGrayscalePixels(void) {
 // Renders the fractal image.
 static void RenderImage(void) {
   int passes_count = 0;
-  size_t data_size = g.dimensions.w * g.dimensions.h;
   double start_seconds;
   printf("Calculating Buddhabrot.\n");
   if (g.seconds_to_run < 0) {
@@ -401,7 +480,6 @@ static void RenderImage(void) {
     CheckCUDAError(cudaDeviceSynchronize());
     if ((g.seconds_to_run >= 0) && ((CurrentSeconds() - start_seconds) >
       g.seconds_to_run)) {
-      g.done_rendering = 1;
       break;
     }
   }
@@ -409,7 +487,7 @@ static void RenderImage(void) {
   // Copy the resulting image to CPU memory, and convert the pixels to proper
   // grayscale values.
   CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
-    data_size * sizeof(Pixel), cudaMemcpyDeviceToHost));
+    GetImageBufferSize(), cudaMemcpyDeviceToHost));
   printf("%d Buddhabrot passes took %f seconds.\n", passes_count,
     CurrentSeconds() - start_seconds);
   SetGrayscalePixels();
@@ -513,11 +591,10 @@ static void PrintUsage(char *program_name) {
     "  -h <height>: The height of the output image, in pixels. Defaults to\n"
     "     1000.\n"
     "  -s <save/load file>: If provided, this gives a file name into which\n"
-    "     an in-progress rendering buffer will be saved if the program is\n"
-    "     interrupted using ctrl+c. If the program is loaded and the file\n"
-    "     exists, it will be restored from this buffer, but the dimensions\n"
-    "     must match. Note that this file may be HUGE for high-resolution\n"
-    "     images. The file will be deleted after being successfully loaded.\n"
+    "     the rendering buffer will be saved, for future continuation.\n"
+    "     If the program is loaded and the file exists, the buffer will be\n"
+    "     filled with the contents of the file, but the dimensions must\n"
+    "     match. Note that this file may be huge for high-resolution images.\n"
     "\n"
     "The following settings control the location of the output image on the\n"
     "complex plane, but samples are always drawn from the entire Mandelbrot-\n"
@@ -699,9 +776,9 @@ int main(int argc, char **argv) {
   LoadInProgressBuffer();
   RenderImage();
   SaveInProgressBuffer();
-  printf("Done! Saving image.\n");
+  printf("Saving image.\n");
   SaveImage();
-  printf("Output image saved: %s\n", g.output_image);
+  printf("Done! Output image saved: %s\n", g.output_image);
   CleanupGlobals();
   return 0;
 }
