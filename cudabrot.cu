@@ -29,6 +29,12 @@
 // The RNG seed used when initializing the RNG states on the GPU.
 #define DEFAULT_RNG_SEED (1337)
 
+// The type that we use to keep track of internal pixel counts. Must be a
+// numerical type that will work with both IncrementPixelCounter,
+// GetLinearColorScale, and DoGammaCorrection. Floating-point values *ought* to
+// work here, too.
+typedef uint32_t Pixel;
+
 // Holds the boundaries and sizes of the fractal, in both pixels and numbers
 typedef struct {
   // The width and height of the image in pixels.
@@ -65,20 +71,26 @@ static struct {
   // The filename to which a bitmap image will be saved, or NULL if an image
   // should not be saved.
   const char *output_image;
+  // The filename from which to load an in-progress image buffer, or to which
+  // the in-progress buffer should be stored if operation is interrupted.
+  const char *inprogress_file;
   // The number of seconds to run the calculation. If negative, run
   // indefinitely until a signal is received.
   double seconds_to_run;
   // If this is nonzero, the program should save the image and quit as soon as
   // the current iteration finishes.
   int quit_signal_received;
+  // If this is nonzero, it indicates that the program finished due to the time
+  // running out. This will never be set to 1 if seconds_to_run is negative.
+  int done_rendering;
   // Holds various iteration-related settings.
   IterationControl iterations;
   // The size and location of the fractal and output image.
   FractalDimensions dimensions;
   // The host and device buffers which contain the numbers of times an escaping
   // point's path crossed each point in the complex plane.
-  uint64_t *device_buddhabrot;
-  uint64_t *host_buddhabrot;
+  Pixel *device_buddhabrot;
+  Pixel *host_buddhabrot;
   // The gamma value for gamma correction.
   double gamma_correction;
   // Buffer for a single grayscale image.
@@ -131,11 +143,11 @@ static void SetupCUDA(void) {
   CheckCUDAError(cudaSetDevice(g.cuda_device));
   size_t buffer_size = g.dimensions.w * g.dimensions.h;
   // The GPU will need space for the image and the RNG states.
-  gpu_memory_needed = buffer_size * sizeof(uint64_t) +
+  gpu_memory_needed = buffer_size * sizeof(Pixel) +
     (g.block_size * g.block_count * sizeof(curandState_t));
   gpu_memory_needed /= (1024.0 * 1024.0);
   // The CPU needs space for the image and grayscale conversion.
-  cpu_memory_needed = buffer_size * sizeof(uint64_t) +
+  cpu_memory_needed = buffer_size * sizeof(Pixel) +
     buffer_size * sizeof(uint16_t);
   cpu_memory_needed /= (1024.0 * 1024.0);
   printf("Approximate memory needed: %.03f MiB GPU, %.03f MiB CPU\n",
@@ -143,16 +155,16 @@ static void SetupCUDA(void) {
 
   // Initialize the host and device image buffers.
   CheckCUDAError(cudaMalloc(&(g.device_buddhabrot), buffer_size *
-    sizeof(uint64_t)));
+    sizeof(Pixel)));
   CheckCUDAError(cudaMemset(g.device_buddhabrot, 0, buffer_size *
-    sizeof(uint64_t)));
-  g.host_buddhabrot = (uint64_t *) malloc(buffer_size * sizeof(uint64_t));
+    sizeof(Pixel)));
+  g.host_buddhabrot = (Pixel *) malloc(buffer_size * sizeof(Pixel));
   if (!g.host_buddhabrot) {
     printf("Failed allocating host Buddhabrot buffer.\n");
     CleanupGlobals();
     exit(1);
   }
-  memset(g.host_buddhabrot, 0, buffer_size * sizeof(uint64_t));
+  memset(g.host_buddhabrot, 0, buffer_size * sizeof(Pixel));
 
   // Initialize the RNG state for the device.
   CheckCUDAError(cudaMalloc(&(g.rng_states), g.block_size * g.block_count *
@@ -168,6 +180,21 @@ static void SetupCUDA(void) {
     exit(1);
   }
   memset(g.grayscale_image, 0, buffer_size * sizeof(uint16_t));
+}
+
+// Loads the in-progress buffer from a file, if the file exists. Exits if an
+// error occurs (such as the file not existing, or not being the right size. If
+// the buffer was loaded successfully, this deletes the file.
+static void LoadInProgressBuffer(void) {
+  // TODO (next): Implement LoadInProgressBuffer.
+}
+
+// Saves the in-progress buffer to a file, if the filename was specified.
+// Returns an error if one occurs. Does nothing if g.done_rendering is true, or
+// if the filename isn't specified.
+static void SaveInProgressBuffer(void) {
+  if (g.done_rendering || !g.inprogress_file) return;
+  // TODO: Implement SaveInProgressBuffer.
 }
 
 // This returns nonzero if the given point is in the main cardioid of the set
@@ -191,7 +218,7 @@ inline __device__ int InOrder2Bulb(double real, double imag) {
 // This should be used to update the pixel data for a point that is encountered
 // in the set.
 inline __device__ void IncrementPixelCounter(double real, double imag,
-    uint64_t *data, FractalDimensions *d) {
+    Pixel *data, FractalDimensions *d) {
   int row, col;
   // There's a small issue here with integer-dividing where values that should
   // be immediately outside of the canvas can still appear on row or col 0, so
@@ -236,7 +263,7 @@ inline __device__ int IterateMandelbrot(double start_real, double start_imag,
 // for a point unless you're sure that it escapes in a finite number of
 // iterations.
 inline __device__ void IterateAndRecord(double start_real, double start_imag,
-    uint64_t *data, FractalDimensions *d) {
+    Pixel *data, FractalDimensions *d) {
   double tmp, real, imag;
   real = start_real;
   imag = start_imag;
@@ -264,7 +291,7 @@ inline __device__ void IterateAndRecord(double start_real, double start_imag,
 // 4. If the point escaped (within the min and max iteration limits), then
 //    repeat the mandelbrot iterations (e.g. step 2), except record its path
 //    by incrementing the pixel value for every point it passes through.
-__global__ void DrawBuddhabrot(FractalDimensions dimensions, uint64_t *data,
+__global__ void DrawBuddhabrot(FractalDimensions dimensions, Pixel *data,
     IterationControl iterations, curandState_t *states) {
   int index = (blockIdx.x * blockDim.x) + threadIdx.x;
   curandState_t *rng = states + index;
@@ -310,7 +337,7 @@ static uint16_t Clamp(double v) {
 // 0xffff.
 static double GetLinearColorScale(void) {
   int x, y, index;
-  uint64_t max = 0;
+  Pixel max = 0;
   double to_return;
   index = 0;
   for (y = 0; y < g.dimensions.h; y++) {
@@ -326,7 +353,7 @@ static double GetLinearColorScale(void) {
 
 // Returns the gamma-corrected 16-bit color channel value given a Buddhabrot
 // iteration count c.
-static uint16_t DoGammaCorrection(uint64_t c, double linear_scale) {
+static uint16_t DoGammaCorrection(Pixel c, double linear_scale) {
   double max = 0xffff;
   double scaled = ((double) c) * linear_scale;
   // Don't do gamma correction if the gamma correction argument was negative.
@@ -334,14 +361,14 @@ static uint16_t DoGammaCorrection(uint64_t c, double linear_scale) {
   return Clamp(max * pow(scaled / max, 1 / g.gamma_correction));
 }
 
-// Converts the buffer of 64-bit pixel values to a gamma-corrected grayscale
-// image with 16-bit colors. The 64-bit values are scaled to fill the 16-bit
-// color range.
+// Converts the buffer of pixel values to a gamma-corrected grayscale image
+// with 16-bit colors. The Pixel values are scaled to fill the 16-bit color
+// range.
 static void SetGrayscalePixels(void) {
   int x, y;
   uint16_t color_value;
   double linear_scale = GetLinearColorScale();
-  uint64_t *host_data = g.host_buddhabrot;
+  Pixel *host_data = g.host_buddhabrot;
   uint16_t *grayscale = g.grayscale_image;
   for (y = 0; y < g.dimensions.h; y++) {
     for (x = 0; x < g.dimensions.w; x++) {
@@ -374,6 +401,7 @@ static void RenderImage(void) {
     CheckCUDAError(cudaDeviceSynchronize());
     if ((g.seconds_to_run >= 0) && ((CurrentSeconds() - start_seconds) >
       g.seconds_to_run)) {
+      g.done_rendering = 1;
       break;
     }
   }
@@ -381,7 +409,7 @@ static void RenderImage(void) {
   // Copy the resulting image to CPU memory, and convert the pixels to proper
   // grayscale values.
   CheckCUDAError(cudaMemcpy(g.host_buddhabrot, g.device_buddhabrot,
-    data_size * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+    data_size * sizeof(Pixel), cudaMemcpyDeviceToHost));
   printf("%d Buddhabrot passes took %f seconds.\n", passes_count,
     CurrentSeconds() - start_seconds);
   SetGrayscalePixels();
@@ -484,6 +512,12 @@ static void PrintUsage(char *program_name) {
     "     1000.\n"
     "  -h <height>: The height of the output image, in pixels. Defaults to\n"
     "     1000.\n"
+    "  -s <save/load file>: If provided, this gives a file name into which\n"
+    "     an in-progress rendering buffer will be saved if the program is\n"
+    "     interrupted using ctrl+c. If the program is loaded and the file\n"
+    "     exists, it will be restored from this buffer, but the dimensions\n"
+    "     must match. Note that this file may be HUGE for high-resolution\n"
+    "     images. The file will be deleted after being successfully loaded.\n"
     "\n"
     "The following settings control the location of the output image on the\n"
     "complex plane, but samples are always drawn from the entire Mandelbrot-\n"
@@ -558,6 +592,15 @@ static void ParseArguments(int argc, char **argv) {
       }
       i++;
       g.output_image = argv[i];
+      continue;
+    }
+    if (strcmp(argv[i], "-s") == 0) {
+      if ((i + 1) >= argc) {
+        printf("Missing in-progress buffer file name.\n");
+        PrintUsage(argv[0]);
+      }
+      i++;
+      g.inprogress_file = argv[i];
       continue;
     }
     if (strcmp(argv[i], "-m") == 0) {
@@ -653,7 +696,9 @@ int main(int argc, char **argv) {
     g.dimensions.w, g.dimensions.h, g.iterations.max_escape_iterations);
   printf("Calculating image...\n");
   SetupCUDA();
+  LoadInProgressBuffer();
   RenderImage();
+  SaveInProgressBuffer();
   printf("Done! Saving image.\n");
   SaveImage();
   printf("Output image saved: %s\n", g.output_image);
