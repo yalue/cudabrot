@@ -71,3 +71,15 @@ Max value: 227153, scale: 0.288506
 Done! Saving image.
 Output image saved: output.pgm
 
+Performance at commit 456d23546f7ebcdfb92aa2512bf379d9732be11b:
+(This is the version after reducing the internal pixel buffer to 32 bit.)
+
+Calculating image...
+Approximate memory needed: 15.815 MiB GPU, 5.722 MiB CPU
+Calculating Buddhabrot.
+Running for 10.000 seconds.
+818 Buddhabrot passes took 10.009091 seconds.
+Max value: 228951, scale: 0.286240
+Done! Saving image.
+Output image saved: output.pgm
+
