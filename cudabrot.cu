@@ -274,7 +274,6 @@ static void SaveInProgressBuffer(void) {
     exit(1);
   }
   fclose(f);
-  // TODO (next): Test saving and loading
 }
 
 // This returns nonzero if the given point is in the main cardioid of the set

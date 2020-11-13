@@ -1,6 +1,6 @@
 .PHONY: all clean hip
 
-CFLAGS := -Wall -Werror -O3 -g -fPIC
+CFLAGS := -Wall -Werror -O3 -g -fPIC -Wno-unknown-pragmas
 
 NVCCFLAGS := -g --ptxas-options=-v --compiler-options="$(CFLAGS)" \
 	--cudart=shared -arch=compute_30 \
