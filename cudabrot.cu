@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
@@ -574,7 +575,7 @@ static void PrintUsage(char *program_name) {
     "  --help: Prints these instructions.\n"
     "  -d <device number>: Sets which GPU to use. Defaults to GPU 0.\n"
     "  -o <output file name>: If provided, the rendered image will be saved\n"
-    "     to a bitmap file with the given name. Otherwise, saves the image\n"
+    "     to a .pgm file with the given name. Otherwise, saves the image\n"
     "     to " DEFAULT_OUTPUT_NAME ".\n"
     "  -m <max escape iterations>: The maximum number of iterations to use\n"
     "     before giving up on seeing whether a point escapes.\n"

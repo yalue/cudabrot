@@ -129,7 +129,7 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of GPU RAM.
    This option defaults to 1.0 (no gamma correction).
    Example images:
 
-    | `./cudabrot -r 200 -m 10000 -c 8000 -t 30 -g 1.0` | `./cudabrot -r 200 -m 10000 -c 8000 -t 30 -g 1.5` | `./cudabrot -r 200 -m 10000 -c 8000 -t 30 -g 2.2` |
+    | `./cudabrot -w 200 -h 200 -m 10000 -c 8000 -t 30 -g 1.0` | `./cudabrot -w 200 -h 200 -m 10000 -c 8000 -t 30 -g 1.5` | `./cudabrot -w 200 -h 200 -m 10000 -c 8000 -t 30 -g 2.2` |
     | :---: | :---: | :---: |
     | ![No gamma correction](examples/gamma_1_0.png) | ![1.5 gamma](examples/gamma_1_5.png) | ![2.2 gamma](examples/gamma_2_2.png) |
 
@@ -140,7 +140,7 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of GPU RAM.
    fine details in the resulting image. This value defaults to 100, which is a
    fairly low value. See these examples:
 
-    | `./cudabrot -r 200 -t 10 -c 20 -m 100` | `./cudabrot -r 200 -t 10 -c 20 -m 1000` | `./cudabrot -r 200 -t 10 -c 20 -m 20000` |
+    | `./cudabrot -w 200 -h 200 -t 10 -c 20 -m 100` | `./cudabrot -w 200 -h 200 -t 10 -c 20 -m 1000` | `./cudabrot -w 200 -h 200 -t 10 -c 20 -m 20000` |
     | :---: | :---: | :---: |
     | ![Low max iterations](examples/max_100.png) | ![Mid max iterations](examples/max_1000.png) | ![High max iterations](examples/max_20000.png) |
 
@@ -152,7 +152,7 @@ All examples below were rendered using an NVIDIA GTX 970 with 4GB of GPU RAM.
    the details produced using higher `-m` values. This value defaults to 20,
    which will produce a cloudy, nebulous image. See these examples:
 
-    | `./cudabrot -r 200 -t 30 -g 1.8 -m 20000 -c 20` | `./cudabrot -r 200 -t 30 -g 1.8 -m 20000 -c 2000` | `./cudabrot -r 200 -t 30 -g 1.8 -m 20000 -c 10000` |
+    | `./cudabrot -w 200 -h 200 -t 30 -g 1.8 -m 20000 -c 20` | `./cudabrot -w 200 -h 200 -t 30 -g 1.8 -m 20000 -c 2000` | `./cudabrot -w 200 -h 200 -t 30 -g 1.8 -m 20000 -c 10000` |
     | :---: | :---: | :---: |
     | ![Low cutoff](examples/cutoff_20.png) | ![Mid cutoff](examples/cutoff_2000.png) | ![High cutoff](examples/cutoff_10000.png) |
 
@@ -163,7 +163,7 @@ Coloring the Buddhabrot
 The Buddhabrot rendering maps most easily to grayscale images, so coloring is
 left to post-processing. The "traditional" way to color a Buddhabrot is to
 generate several grayscale images using different minimum and maximum iteration
-values (the `-r` and `-c` options in this program). The grayscale images can
+values (the `-m` and `-c` options in this program). The grayscale images can
 then be combined into a single output image, with each grayscale image
 contributing to a different color channel in the output.
 
@@ -174,9 +174,9 @@ Here's an example of how to create a color image, using the `image_combiner`
 tool linked above:
 
 ```bash
-./cudabrot -g 2.0 -r 1000 -m 100 -c 20 -t 20 -o low_iterations.pgm
-./cudabrot -g 2.0 -r 1000 -m 2000 -c 600 -t 20 -o mid_iterations.pgm
-./cudabrot -g 2.5 -r 1000 -m 10000 -c 9000 -t 40 -o high_iterations.pgm
+./cudabrot -g 2.0 -w 1000 -h 1000 -m 100 -c 20 -t 20 -o low_iterations.pgm
+./cudabrot -g 2.0 -w 1000 -h 1000 -m 2000 -c 600 -t 20 -o mid_iterations.pgm
+./cudabrot -g 2.5 -w 1000 -h 1000 -m 10000 -c 9000 -t 40 -o high_iterations.pgm
 ./image_combiner \
     low_iterations.pgm blue \
     mid_iterations.pgm lime \
