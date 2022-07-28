@@ -26,13 +26,13 @@
 # much as possible.
 ./cudabrot -o fine_hires.pgm \
 	-m 60000 -c 45000 \
-	-w 40000 -h 30000 \
+	-w 20000 -h 15000 \
 	--min-imag -1.5 --max-imag 1.5 \
 	--min-real -2.0 --max-real 2.0 \
-	-t $((60 * 60 * 8))
+	-t $((60 * 60 * 12))
 # ImageMagick's "normalize" does a much better job at getting nice looking
 # brightness levels than guessing good gamma-correction values.
-convert fine_hires.pgm -resize 50% -normalize -quality 100 fine_hires.jpg
+convert fine_hires.pgm -normalize -quality 100 fine_hires.jpg
 # Now that we've converted to jpg, we can save space by removing the .pgm.
 rm fine_hires.pgm
 
@@ -45,18 +45,18 @@ rm fine_hires.pgm
 	-w 20000 -h 15000 \
 	--min-imag -1.5 --max-imag 1.5 \
 	--min-real -2.0 --max-real 2.0 \
-	-t $((60 * 60 * 2))
+	-t $((60 * 60 * 4))
 convert med_hires.pgm -normalize -quality 100 med_hires.jpg
 rm med_hires.pgm
 
 # The "coarse" image requires between 100 and 5 iterations, to get the larger
 # shapes and clouds surrounding the set. Only renders for 1 hour.
 ./cudabrot -o coarse_hires.pgm \
-	-m 100 -c 5 \
+	-m 500 -c 20 \
 	-w 20000 -h 15000 \
 	--min-imag -1.5 --max-imag 1.5 \
 	--min-real -2.0 --max-real 2.0 \
-	-t $((60 * 60))
+	-t $((60 * 60 * 2))
 convert coarse_hires.pgm -normalize -quality 100 coarse_hires.jpg
 rm coarse_hires.pgm
 
@@ -64,9 +64,9 @@ rm coarse_hires.pgm
 # path (see the comment at the top). Feel free to experiment with different
 # mappings to H, S, or L, or different hue adjustments.
 ./image_combiner_hsl \
-	-H coarse_hires.jpg \
-	-S fine_hires.jpg \
-	-L med_hires.jpg \
+	-H med_hires.jpg \
+	-S coarse_hires.jpg \
+	-L fine_hires.jpg \
 	-adjust_hue 0.3 \
 	-o combined.jpg
 

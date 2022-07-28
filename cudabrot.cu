@@ -23,7 +23,7 @@
 #define DEFAULT_OUTPUT_NAME "output.pgm"
 
 // This macro takes a cudaError_t value and exits the program if it isn't equal
-// to cudaSuccess. (Calls the ErrorCheck function, defined later).
+// to cudaSuccess.
 #define CheckCUDAError(val) (InternalCUDAErrorCheck((val), #val, __FILE__, __LINE__))
 
 // Increasing this may increase efficiency, but decrease responsiveness to
@@ -65,8 +65,7 @@ typedef struct {
 
 // Holds global state in a single struct.
 static struct {
-  // The CUDA device to use. If this is -1, a device won't be set, which should
-  // fall back to CUDA's normal device.
+  // The CUDA device to use. Defaults to 0.
   int cuda_device;
   // This tracks the random number generator states for the GPU code.
   curandState_t *rng_states;
@@ -324,8 +323,10 @@ inline __device__ int IterateMandelbrot(double start_real, double start_imag,
   // This loop-unrolling was tested on a Radeon VII, anything higher or lower
   // than 4 produced worse performance. May differ on other devices, or future
   // compiler updates.
-#pragma unroll 4
+//#pragma unroll 4
   for (i = 0; i < max_iterations; i++) {
+    real = fabs(real);
+    imag = fabs(imag);
     tmp = (real * real) - (imag * imag) + start_real;
     imag = 2 * real * imag + start_imag;
     real = tmp;
@@ -347,8 +348,10 @@ inline __device__ void IterateAndRecord(double start_real, double start_imag,
   double tmp, real, imag;
   real = start_real;
   imag = start_imag;
-#pragma unroll 4
+//#pragma unroll 4
   while (1) {
+    real = fabs(real);
+    imag = fabs(imag);
     tmp = (real * real) - (imag * imag) + start_real;
     imag = 2 * real * imag + start_imag;
     real = tmp;
@@ -389,7 +392,7 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, Pixel *data,
 
     // Optimization: we know ahead of time that points from the main cardioid
     // and the largest "bulb" will never escape, and it's fast to check them.
-    if (InMainCardioid(real, imag) || InOrder2Bulb(real, imag)) continue;
+    //if (InMainCardioid(real, imag) || InOrder2Bulb(real, imag)) continue;
 
     // Now, do the normal Mandelbrot iterations to see how quickly the point
     // escapes (if it does). However, we won't record the path yet.
