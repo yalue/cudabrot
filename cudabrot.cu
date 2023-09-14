@@ -12,6 +12,9 @@
 #include <curand.h>
 #include <curand_kernel.h>
 
+// Uncomment this line to render the "Buddhabrot" version of the burning ship
+// fractal rather than the regular Buddhabrot.
+// #define RENDER_BURNING_SHIP (1)
 
 // Controls the number of threads per block to use.
 #define DEFAULT_BLOCK_SIZE (512)
@@ -320,13 +323,11 @@ inline __device__ int IterateMandelbrot(double start_real, double start_imag,
   real = start_real;
   imag = start_imag;
 
-  // This loop-unrolling was tested on a Radeon VII, anything higher or lower
-  // than 4 produced worse performance. May differ on other devices, or future
-  // compiler updates.
-//#pragma unroll 4
   for (i = 0; i < max_iterations; i++) {
+#ifdef RENDER_BURNING_SHIP
     real = fabs(real);
     imag = fabs(imag);
+#endif
     tmp = (real * real) - (imag * imag) + start_real;
     imag = 2 * real * imag + start_imag;
     real = tmp;
@@ -348,10 +349,11 @@ inline __device__ void IterateAndRecord(double start_real, double start_imag,
   double tmp, real, imag;
   real = start_real;
   imag = start_imag;
-//#pragma unroll 4
   while (1) {
+#ifdef RENDER_BURNING_SHIP
     real = fabs(real);
     imag = fabs(imag);
+#endif
     tmp = (real * real) - (imag * imag) + start_real;
     imag = 2 * real * imag + start_imag;
     real = tmp;
@@ -392,7 +394,9 @@ __global__ void DrawBuddhabrot(FractalDimensions dimensions, Pixel *data,
 
     // Optimization: we know ahead of time that points from the main cardioid
     // and the largest "bulb" will never escape, and it's fast to check them.
-    //if (InMainCardioid(real, imag) || InOrder2Bulb(real, imag)) continue;
+#ifndef RENDER_BURNING_SHIP
+    if (InMainCardioid(real, imag) || InOrder2Bulb(real, imag)) continue;
+#endif
 
     // Now, do the normal Mandelbrot iterations to see how quickly the point
     // escapes (if it does). However, we won't record the path yet.
